@@ -1,0 +1,62 @@
+{
+  "language": "en",
+  "duration_seconds": 74.0,
+  "segments": [
+    {
+      "start": 0.0,
+      "end": 5.4,
+      "text": "Welcome to TrueID Live. Today we are opening with a True 5G entertainment bundle.",
+      "source": "cached_demo",
+      "confidence": 0.99
+    },
+    {
+      "start": 5.4,
+      "end": 13.1,
+      "text": "This offer is designed for fans who stream sports, movies, and short video from one app.",
+      "source": "cached_demo",
+      "confidence": 0.98
+    },
+    {
+      "start": 13.1,
+      "end": 22.0,
+      "text": "The host can keep talking naturally while the copilot prepares accurate live captions for viewers.",
+      "source": "cached_demo",
+      "confidence": 0.98
+    },
+    {
+      "start": 22.0,
+      "end": 31.5,
+      "text": "Next, we highlight a True Online home internet plan for families watching on smart TVs and mobile devices.",
+      "source": "cached_demo",
+      "confidence": 0.97
+    },
+    {
+      "start": 31.5,
+      "end": 41.3,
+      "text": "The demo keeps a timestamped transcript so operators can search the session after the stream ends.",
+      "source": "cached_demo",
+      "confidence": 0.99
+    },
+    {
+      "start": 41.3,
+      "end": 50.2,
+      "text": "For this first slice, the captioning path is guaranteed to run from cached data when speech models are unavailable.",
+      "source": "cached_demo",
+      "confidence": 0.99
+    },
+    {
+      "start": 50.2,
+      "end": 61.0,
+      "text": "In production, the same interface can receive four second audio windows from a live stream adapter.",
+      "source": "cached_demo",
+      "confidence": 0.98
+    },
+    {
+      "start": 61.0,
+      "end": 74.0,
+      "text": "The output is ready for a viewer subtitle overlay, a moderator console, and a post show analytics notebook.",
+      "source": "cached_demo",
+      "confidence": 0.98
+    }
+  ]
+}

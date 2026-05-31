@@ -1,0 +1,3 @@
+# Optional dependencies for real Whisper inference.
+# The default demo path does not require these packages.
+openai-whisper==20240930

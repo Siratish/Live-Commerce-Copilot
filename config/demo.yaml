@@ -1,0 +1,14 @@
+captioning:
+  mode: cached
+  language: en
+  cached_transcript_path: data/demo/cached_transcript.json
+  audio_path: null
+  whisper_model: tiny
+  allow_cached_fallback: true
+
+outputs:
+  directory: outputs
+  captions_json: captions.json
+  captions_vtt: captions.vtt
+  captions_srt: captions.srt
+  metrics_json: caption_metrics.json
