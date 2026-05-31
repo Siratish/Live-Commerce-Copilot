@@ -1,60 +1,60 @@
 {
-  "language": "en",
+  "language": "th",
   "duration_seconds": 74.0,
   "segments": [
     {
       "start": 0.0,
       "end": 5.4,
-      "text": "Welcome to TrueID Live. Today we are opening with a True 5G entertainment bundle.",
+      "text": "ยินดีต้อนรับสู่ TrueID Live วันนี้เราเริ่มด้วยแพ็กเกจบันเทิง True 5G",
       "source": "cached_demo",
       "confidence": 0.99
     },
     {
       "start": 5.4,
       "end": 13.1,
-      "text": "This offer is designed for fans who stream sports, movies, and short video from one app.",
+      "text": "ข้อเสนอนี้ออกแบบมาสำหรับแฟนๆ ที่สตรีมกีฬา ภาพยนตร์ และวิดีโอสั้นจากแอปเดียว",
       "source": "cached_demo",
       "confidence": 0.98
     },
     {
       "start": 13.1,
       "end": 22.0,
-      "text": "The host can keep talking naturally while the copilot prepares accurate live captions for viewers.",
+      "text": "พิธีกรสามารถพูดได้อย่างเป็นธรรมชาติ ขณะที่โคไพลอตเตรียมคำบรรยายสดที่แม่นยำให้ผู้ชม",
       "source": "cached_demo",
       "confidence": 0.98
     },
     {
       "start": 22.0,
       "end": 31.5,
-      "text": "Next, we highlight a True Online home internet plan for families watching on smart TVs and mobile devices.",
+      "text": "ต่อไปเราจะนำเสนอแพ็กเกจ True Online อินเทอร์เน็ตบ้าน สำหรับครอบครัวที่รับชมบนสมาร์ททีวีและมือถือ",
       "source": "cached_demo",
       "confidence": 0.97
     },
     {
       "start": 31.5,
       "end": 41.3,
-      "text": "The demo keeps a timestamped transcript so operators can search the session after the stream ends.",
+      "text": "เดโมนี้เก็บทรานสคริปต์พร้อมเวลา เพื่อให้ทีมปฏิบัติการค้นหาเซสชันได้หลังไลฟ์จบ",
       "source": "cached_demo",
       "confidence": 0.99
     },
     {
       "start": 41.3,
       "end": 50.2,
-      "text": "For this first slice, the captioning path is guaranteed to run from cached data when speech models are unavailable.",
+      "text": "สำหรับส่วนแรกนี้ ระบบคำบรรยายจะรันจากข้อมูลแคชได้เสมอเมื่อโมเดลเสียงไม่พร้อมใช้งาน",
       "source": "cached_demo",
       "confidence": 0.99
     },
     {
       "start": 50.2,
       "end": 61.0,
-      "text": "In production, the same interface can receive four second audio windows from a live stream adapter.",
+      "text": "ในระบบจริง อินเทอร์เฟซเดียวกันสามารถรับช่วงเสียงสี่วินาทีจากอะแดปเตอร์ไลฟ์สตรีม",
       "source": "cached_demo",
       "confidence": 0.98
     },
     {
       "start": 61.0,
       "end": 74.0,
-      "text": "The output is ready for a viewer subtitle overlay, a moderator console, and a post show analytics notebook.",
+      "text": "เอาต์พุตพร้อมใช้กับซับไตเติลสำหรับผู้ชม คอนโซลผู้ดูแล และโน้ตบุ๊กวิเคราะห์หลังไลฟ์",
       "source": "cached_demo",
       "confidence": 0.98
     }

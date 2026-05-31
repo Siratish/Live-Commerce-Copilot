@@ -99,7 +99,7 @@ def load_cached_transcript(path: Path) -> CaptionResult:
 def save_caption_json(result: CaptionResult, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as handle:
-        json.dump(result.to_dict(), handle, indent=2)
+        json.dump(result.to_dict(), handle, indent=2, ensure_ascii=False)
         handle.write("\n")
 
 

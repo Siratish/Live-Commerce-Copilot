@@ -14,6 +14,7 @@ from src.ai.captioning import (
     write_caption_outputs,
 )
 from src.schemas import validate_caption_segments
+from src.utils.realtime_caption import build_realtime_caption_html
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -24,7 +25,7 @@ CONFIG = REPO_ROOT / "config" / "demo.yaml"
 class CaptioningTests(unittest.TestCase):
     def test_cached_transcript_loads(self) -> None:
         result = load_cached_transcript(CACHED_TRANSCRIPT)
-        self.assertEqual(result.language, "en")
+        self.assertEqual(result.language, "th")
         self.assertGreater(len(result.segments), 0)
 
     def test_timestamps_are_valid(self) -> None:
@@ -70,8 +71,19 @@ class CaptioningTests(unittest.TestCase):
             )
             summary = json.loads(completed.stdout)
             self.assertEqual(summary["segment_count"], 8)
+            self.assertEqual(summary["language"], "th")
+            self.assertTrue(summary["audio_path"].endswith("data\\demo\\audio\\1.mp3") or summary["audio_path"].endswith("data/demo/audio/1.mp3"))
             self.assertTrue((Path(temp_dir) / "captions.json").exists())
             self.assertTrue((Path(temp_dir) / "captions.vtt").exists())
+
+    def test_realtime_caption_html_embeds_audio_and_segments(self) -> None:
+        result = load_cached_transcript(CACHED_TRANSCRIPT)
+        audio_path = REPO_ROOT / "data" / "demo" / "audio" / "1.mp3"
+        html = build_realtime_caption_html(audio_path, result)
+        self.assertIn("<audio controls", html)
+        self.assertIn("data:audio/mpeg;base64,", html)
+        self.assertIn("Generating caption", html)
+        self.assertIn(result.segments[0].text, html)
 
 
 if __name__ == "__main__":

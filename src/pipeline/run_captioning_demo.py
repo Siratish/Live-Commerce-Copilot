@@ -115,6 +115,8 @@ def run_from_config(
     return {
         "language": result.language,
         "segment_count": len(result.segments),
+        "mode": settings.mode,
+        "audio_path": str(settings.audio_path) if settings.audio_path else None,
         "metrics": metrics,
         "outputs": {key: str(value) for key, value in paths.items()},
     }

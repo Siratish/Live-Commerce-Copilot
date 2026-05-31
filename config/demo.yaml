@@ -1,8 +1,8 @@
 captioning:
-  mode: cached
-  language: en
+  mode: auto
+  language: th
   cached_transcript_path: data/demo/cached_transcript.json
-  audio_path: null
+  audio_path: data/demo/audio/1.mp3
   whisper_model: tiny
   allow_cached_fallback: true
 
