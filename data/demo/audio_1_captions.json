@@ -1,0 +1,160 @@
+{
+  "language": "th",
+  "duration_seconds": 77.58,
+  "segments": [
+    {
+      "start": 0.0,
+      "end": 4.38,
+      "text": "สวัสดีค่ะทุกคน ยินดีต้อนรับเข้าสู่ True ID Life Beauty Deal นะคะ",
+      "source": "openai_whisper",
+      "confidence": null
+    },
+    {
+      "start": 4.38,
+      "end": 8.3,
+      "text": "วันนี้เรามีโปรพิเศษเฉพาะในไลฟ์นี้เท่านั้นค่ะ",
+      "source": "openai_whisper",
+      "confidence": null
+    },
+    {
+      "start": 8.3,
+      "end": 13.8,
+      "text": "ตัวแรกคือวิตามินซีซีรั่มจาก Demo Beauty ปกติราคา 399 บาท",
+      "source": "openai_whisper",
+      "confidence": null
+    },
+    {
+      "start": 13.8,
+      "end": 16.68,
+      "text": "แต่ในไลฟ์นี้ลดเหลือ 299 บาทค่ะ",
+      "source": "openai_whisper",
+      "confidence": null
+    },
+    {
+      "start": 16.68,
+      "end": 19.52,
+      "text": "ตัวนี้เหมาะสำหรับคนที่อยากให้ผิวดูกระจ่างใส",
+      "source": "openai_whisper",
+      "confidence": null
+    },
+    {
+      "start": 19.52,
+      "end": 22.64,
+      "text": "มีส่วนผสมของวิตามินซีและไฮลูโรนิกอัสซิบ",
+      "source": "openai_whisper",
+      "confidence": null
+    },
+    {
+      "start": 22.64,
+      "end": 25.52,
+      "text": "เนื้อบางเบาใช้ตอนเช้าหรือก่อนนอนได้ค่ะ",
+      "source": "openai_whisper",
+      "confidence": null
+    },
+    {
+      "start": 25.52,
+      "end": 29.36,
+      "text": "ถ้าใครสนใจกดดูที่ Product Card ด้านล่างได้เลยนะคะ",
+      "source": "openai_whisper",
+      "confidence": null
+    },
+    {
+      "start": 29.36,
+      "end": 32.32,
+      "text": "แล้วใช้ Code Life 25 เพื่อรับส่วนลดเพิ่ม",
+      "source": "openai_whisper",
+      "confidence": null
+    },
+    {
+      "start": 32.32,
+      "end": 34.78,
+      "text": "ตอนเช็คเอาท์เฉพาะช่วงไลฟ์นี้เท่านั้นค่ะ",
+      "source": "openai_whisper",
+      "confidence": null
+    },
+    {
+      "start": 34.78,
+      "end": 37.78,
+      "text": "สำหรับใครที่ถามว่าใช้กับผิวแพ้ง่ายได้ไหม",
+      "source": "openai_whisper",
+      "confidence": null
+    },
+    {
+      "start": 37.78,
+      "end": 40.78,
+      "text": "จากข้อมูลสินค้าตัวนี้เป็นสูตรอ่อนโยนค่ะ",
+      "source": "openai_whisper",
+      "confidence": null
+    },
+    {
+      "start": 40.78,
+      "end": 45.38,
+      "text": "แต่ถ้าผิวแพ้ง่ายมากแนะนำให้ลองทดสอบวันอิเวณเล็กๆก่อนใช้นะคะ",
+      "source": "openai_whisper",
+      "confidence": null
+    },
+    {
+      "start": 45.38,
+      "end": 49.08,
+      "text": "ต่อไปขอสลับไปอีกตัวนึงนะคะเมื่อกี้เป็นวิตามินซีซีรัม",
+      "source": "openai_whisper",
+      "confidence": null
+    },
+    {
+      "start": 49.08,
+      "end": 53.68,
+      "text": "ตอนนี้เป็น Green Tea Cleanser จาก Demo Beauty ค่ะ",
+      "source": "openai_whisper",
+      "confidence": null
+    },
+    {
+      "start": 53.68,
+      "end": 56.58,
+      "text": "ปกติราคา 259 บาท",
+      "source": "openai_whisper",
+      "confidence": null
+    },
+    {
+      "start": 56.58,
+      "end": 59.28,
+      "text": "วันนี้เหลือ 199 บาท",
+      "source": "openai_whisper",
+      "confidence": null
+    },
+    {
+      "start": 59.28,
+      "end": 63.08,
+      "text": "ตัวนี้เป็น Cleanse สูตรอ่อนโยนเหมาะสำหรับใช้ทุกวันค่ะ",
+      "source": "openai_whisper",
+      "confidence": null
+    },
+    {
+      "start": 63.08,
+      "end": 68.28,
+      "text": "ถ้าใช้คู่กันแนะนำให้ใช้ Green Tea Cleanser ก่อนแล้วตามด้วยวิตามินซีซีรัมหลังล้างหน้านะคะ",
+      "source": "openai_whisper",
+      "confidence": null
+    },
+    {
+      "start": 68.28,
+      "end": 70.58,
+      "text": "จะได้เป็นสกินแคร์รูทินที่ครบขึ้นค่ะ",
+      "source": "openai_whisper",
+      "confidence": null
+    },
+    {
+      "start": 70.58,
+      "end": 74.08,
+      "text": "ตอนนี้โปรไลท์ 2 ห้าเหลือเวลาอีก 5 นาทีเท่านั้นนะคะ",
+      "source": "openai_whisper",
+      "confidence": null
+    },
+    {
+      "start": 74.08,
+      "end": 77.58,
+      "text": "ใครสนใจสามารถกดซื้อผ่านลิงค์ในชู ID ไลท์ได้เลยค่ะ",
+      "source": "openai_whisper",
+      "confidence": null
+    }
+  ]
+}

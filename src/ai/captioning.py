@@ -6,7 +6,12 @@ from typing import Dict, Optional
 import json
 import shutil
 
-from src.schemas import CaptionResult, CaptionSegment, validate_caption_segments
+from src.schemas import (
+    CaptionResult,
+    CaptionSegment,
+    repair_caption_timestamps,
+    validate_caption_segments,
+)
 
 
 class CaptioningUnavailable(RuntimeError):
@@ -81,7 +86,7 @@ class CaptioningEngine:
             for item in raw.get("segments", [])
             if str(item.get("text", "")).strip()
         ]
-        validate_caption_segments(segments)
+        segments = repair_caption_timestamps(segments)
         duration = segments[-1].end if segments else None
         return CaptionResult(
             language=str(raw.get("language", self.settings.language)),

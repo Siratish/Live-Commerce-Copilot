@@ -13,7 +13,7 @@ from src.ai.captioning import (
     load_cached_transcript,
     write_caption_outputs,
 )
-from src.schemas import validate_caption_segments
+from src.schemas import CaptionSegment, repair_caption_timestamps, validate_caption_segments
 from src.utils.realtime_caption import build_realtime_caption_html
 
 
@@ -61,6 +61,8 @@ class CaptioningTests(unittest.TestCase):
                     "src.pipeline.run_captioning_demo",
                     "--config",
                     str(CONFIG),
+                    "--mode",
+                    "cached",
                     "--output-dir",
                     temp_dir,
                 ],
@@ -70,7 +72,7 @@ class CaptioningTests(unittest.TestCase):
                 text=True,
             )
             summary = json.loads(completed.stdout)
-            self.assertEqual(summary["segment_count"], 8)
+            self.assertEqual(summary["segment_count"], 22)
             self.assertEqual(summary["language"], "th")
             self.assertTrue(summary["audio_path"].endswith("data\\demo\\audio\\1.mp3") or summary["audio_path"].endswith("data/demo/audio/1.mp3"))
             self.assertTrue((Path(temp_dir) / "captions.json").exists())
@@ -84,6 +86,17 @@ class CaptioningTests(unittest.TestCase):
         self.assertIn("data:audio/mpeg;base64,", html)
         self.assertIn("Generating caption", html)
         self.assertIn(result.segments[0].text, html)
+
+    def test_repair_caption_timestamps_clamps_whisper_overlap(self) -> None:
+        segments = [
+            CaptionSegment(0.0, 2.0, "first", "openai_whisper"),
+            CaptionSegment(1.9, 3.0, "second", "openai_whisper"),
+            CaptionSegment(2.8, 2.8, "third", "openai_whisper"),
+        ]
+        repaired = repair_caption_timestamps(segments)
+        validate_caption_segments(repaired)
+        self.assertEqual(repaired[1].start, 2.0)
+        self.assertGreater(repaired[2].end, repaired[2].start)
 
 
 if __name__ == "__main__":

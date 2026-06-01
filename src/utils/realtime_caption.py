@@ -53,7 +53,7 @@ def build_realtime_caption_html(
     duration = _duration_from_any(captions, segments)
     widget_id = f"caption-widget-{uuid.uuid4().hex}"
     data_uri = _audio_data_uri(audio_path)
-    segments_json = json.dumps(segments, ensure_ascii=False)
+    segments_json = json.dumps(segments, ensure_ascii=False).replace("</", "<\\/")
     escaped_title = html.escape(title)
 
     return f"""
