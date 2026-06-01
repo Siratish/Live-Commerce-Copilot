@@ -7,7 +7,7 @@ import json
 import sys
 
 from src.ai.commerce_actions import generate_commerce_actions, load_caption_result, save_commerce_actions
-from src.data.catalog import load_product_catalog
+from src.data.catalog import load_product_catalog, load_promotions
 from src.utils.action_timeline import save_action_timeline_html
 
 
@@ -24,12 +24,14 @@ def resolve_repo_path(value: Optional[str]) -> Optional[Path]:
 def run_actions_from_paths(
     captions_path: Path,
     catalog_path: Path,
+    promotions_path: Path,
     output_dir: Path,
     audio_path: Optional[Path] = None,
 ) -> Dict[str, Any]:
     captions = load_caption_result(captions_path)
     catalog = load_product_catalog(catalog_path)
-    actions = generate_commerce_actions(captions, catalog)
+    promotions = load_promotions(promotions_path)
+    actions = generate_commerce_actions(captions, catalog, promotions)
 
     output_dir.mkdir(parents=True, exist_ok=True)
     actions_path = output_dir / "commerce_actions.json"
@@ -52,6 +54,11 @@ def build_parser() -> ArgumentParser:
     parser.add_argument("--captions", required=True, help="Path to captions JSON.")
     parser.add_argument("--catalog", required=True, help="Path to product catalog CSV.")
     parser.add_argument(
+        "--promotions",
+        default=str(REPO_ROOT / "data" / "demo" / "promotions.csv"),
+        help="Path to promotion rules CSV.",
+    )
+    parser.add_argument(
         "--output-dir",
         default=str(REPO_ROOT / "outputs"),
         help="Directory for generated action outputs.",
@@ -69,6 +76,7 @@ def main() -> None:
     summary = run_actions_from_paths(
         captions_path=resolve_repo_path(args.captions) or Path(args.captions),
         catalog_path=resolve_repo_path(args.catalog) or Path(args.catalog),
+        promotions_path=resolve_repo_path(args.promotions) or Path(args.promotions),
         output_dir=resolve_repo_path(args.output_dir) or Path(args.output_dir),
         audio_path=resolve_repo_path(args.audio) if args.audio else None,
     )

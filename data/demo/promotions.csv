@@ -1,0 +1,4 @@
+promo_code,promo_description,discount_type,discount_value,live_only,eligible_categories,eligible_tags,eligible_skus,required_min_stock
+LIVE25,Extra 25% discount during live only,percent,25,true,Skincare,skincare,SKU001;SKU002;SKU007,1
+WELLNESS15,15% discount for wellness products,percent,15,true,Wellness;Skincare,wellness;spf50,SKU003;SKU004,1
+TECH100,100 THB discount during tech live,fixed_amount,100,true,Mobile Accessories,,SKU005;SKU006;SKU008,1

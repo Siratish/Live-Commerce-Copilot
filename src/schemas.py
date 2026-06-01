@@ -82,8 +82,6 @@ class ProductCatalogItem:
     category: str
     price: int
     discount_price: int
-    promo_code: str
-    promo_description: str
     stock: int
     description: str
     tags: List[str]
@@ -99,8 +97,6 @@ class ProductCatalogItem:
             category=str(raw["category"]).strip(),
             price=int(raw["price"]),
             discount_price=int(raw["discount_price"]),
-            promo_code=str(raw["promo_code"]).strip().upper(),
-            promo_description=str(raw["promo_description"]).strip(),
             stock=int(raw["stock"]),
             description=str(raw["description"]).strip(),
             tags=_split_semicolon(raw.get("tags", "")),
@@ -116,13 +112,67 @@ class ProductCatalogItem:
             "category": self.category,
             "price": self.price,
             "discount_price": self.discount_price,
-            "promo_code": self.promo_code,
-            "promo_description": self.promo_description,
             "stock": self.stock,
             "description": self.description,
             "tags": self.tags,
             "compatible_with": self.compatible_with,
             "deeplink": self.deeplink,
+        }
+
+
+@dataclass(frozen=True)
+class Promotion:
+    promo_code: str
+    promo_description: str
+    discount_type: str
+    discount_value: int
+    live_only: bool
+    eligible_categories: List[str]
+    eligible_tags: List[str]
+    eligible_skus: List[str]
+    required_min_stock: int = 0
+
+    @classmethod
+    def from_dict(cls, raw: Dict[str, Any]) -> "Promotion":
+        return cls(
+            promo_code=str(raw["promo_code"]).strip().upper(),
+            promo_description=str(raw["promo_description"]).strip(),
+            discount_type=str(raw["discount_type"]).strip(),
+            discount_value=int(raw["discount_value"]),
+            live_only=_to_bool(raw.get("live_only", False)),
+            eligible_categories=_split_semicolon(raw.get("eligible_categories", "")),
+            eligible_tags=_split_semicolon(raw.get("eligible_tags", "")),
+            eligible_skus=_split_semicolon(raw.get("eligible_skus", "")),
+            required_min_stock=int(raw.get("required_min_stock") or 0),
+        )
+
+    def applies_to(self, item: ProductCatalogItem) -> bool:
+        if self.eligible_skus and item.sku not in self.eligible_skus:
+            return False
+        if item.stock < self.required_min_stock:
+            return False
+
+        category_match = (
+            not self.eligible_categories
+            or item.category in self.eligible_categories
+        )
+        tag_match = (
+            not self.eligible_tags
+            or bool(set(item.tags).intersection(self.eligible_tags))
+        )
+        return category_match and tag_match
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "promo_code": self.promo_code,
+            "promo_description": self.promo_description,
+            "discount_type": self.discount_type,
+            "discount_value": self.discount_value,
+            "live_only": self.live_only,
+            "eligible_categories": self.eligible_categories,
+            "eligible_tags": self.eligible_tags,
+            "eligible_skus": self.eligible_skus,
+            "required_min_stock": self.required_min_stock,
         }
 
 
@@ -197,3 +247,7 @@ def repair_caption_timestamps(
 
 def _split_semicolon(value: Any) -> List[str]:
     return [part.strip() for part in str(value or "").split(";") if part.strip()]
+
+
+def _to_bool(value: Any) -> bool:
+    return str(value).strip().lower() in {"1", "true", "yes", "y"}
