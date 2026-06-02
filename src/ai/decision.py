@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+from collections.abc import Mapping as RuntimeMapping
 from collections.abc import Sequence as RuntimeSequence
 from dataclasses import dataclass, field
 from typing import Any, Callable, List, Mapping, Optional, Protocol, Sequence
+import json
+import re
 
 from src.ai.retrieval import ProductCandidate, PromotionCandidate, extract_numbers, normalize_search_text
 from src.schemas import ProductCatalogItem, Promotion
@@ -23,6 +26,7 @@ FLASH_CUES = [
     "\u0e44\u0e25\u0e1f\u0e4c",
 ]
 MINUTE_WORDS = ["\u0e19\u0e32\u0e17\u0e35", "minute"]
+DEFAULT_TYPHOON_S_MODEL_ID = "typhoon-ai/typhoon-s-thaillm-8b-instruct-research-preview"
 
 
 @dataclass(frozen=True)
@@ -105,6 +109,91 @@ class CallableModelDecisionProvider:
             return _decision_from_mapping(raw_decision)
         except Exception:
             return self.fallback.decide(window, candidates, state, catalog, promotions)
+
+
+TextGenerationCallable = Callable[[List[Mapping[str, str]]], str]
+
+
+class TyphoonSDecisionProvider:
+    """Optional Typhoon-S ThaiLLM decider with deterministic fallback."""
+
+    def __init__(
+        self,
+        model_id: str = DEFAULT_TYPHOON_S_MODEL_ID,
+        max_new_tokens: int = 256,
+        temperature: float = 0.1,
+        fallback: Optional[CommerceDecisionProvider] = None,
+        text_generator: Optional[TextGenerationCallable] = None,
+    ):
+        self.model_id = model_id
+        self.max_new_tokens = max_new_tokens
+        self.temperature = temperature
+        self.fallback = fallback or DeterministicDecisionProvider()
+        self.text_generator = text_generator
+        self._tokenizer = None
+        self._model = None
+        self._disabled = False
+
+    def decide(
+        self,
+        window: TranscriptWindow,
+        candidates: CommerceCandidates,
+        state: CommerceSessionState,
+        catalog: Sequence[ProductCatalogItem],
+        promotions: Sequence[Promotion],
+    ) -> CommerceDecision:
+        if self._disabled:
+            return self.fallback.decide(window, candidates, state, catalog, promotions)
+        payload = _model_payload(window, candidates, state)
+        try:
+            messages = _typhoon_s_messages(payload)
+            response_text = (
+                self.text_generator(messages)
+                if self.text_generator
+                else self._generate_with_transformers(messages)
+            )
+            return _decision_from_mapping(extract_json_mapping(response_text))
+        except Exception:
+            self._disabled = True
+            return self.fallback.decide(window, candidates, state, catalog, promotions)
+
+    def _generate_with_transformers(self, messages: List[Mapping[str, str]]) -> str:
+        try:
+            import torch  # type: ignore
+            from transformers import AutoModelForCausalLM, AutoTokenizer  # type: ignore
+        except ImportError as exc:
+            raise RuntimeError(
+                "Typhoon-S decisions require torch and transformers>=4.57.0"
+            ) from exc
+
+        if self._tokenizer is None or self._model is None:
+            self._tokenizer = AutoTokenizer.from_pretrained(self.model_id)
+            self._model = AutoModelForCausalLM.from_pretrained(
+                self.model_id,
+                torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
+                device_map="auto",
+            )
+
+        inputs = self._tokenizer.apply_chat_template(
+            messages,
+            add_generation_prompt=True,
+            tokenize=True,
+            return_dict=True,
+            return_tensors="pt",
+        ).to(self._model.device)
+        generation_kwargs = {
+            "max_new_tokens": self.max_new_tokens,
+            "do_sample": self.temperature > 0,
+            "repetition_penalty": 1.05,
+        }
+        if self.temperature > 0:
+            generation_kwargs["temperature"] = self.temperature
+        outputs = self._model.generate(
+            **inputs,
+            **generation_kwargs,
+        )
+        response = outputs[0][inputs["input_ids"].shape[-1] :]
+        return self._tokenizer.decode(response, skip_special_tokens=True)
 
 
 class DeterministicDecisionProvider:
@@ -228,6 +317,43 @@ def _model_payload(
             "flash_confidence": "float",
         },
     }
+
+
+def _typhoon_s_messages(payload: Mapping[str, Any]) -> List[Mapping[str, str]]:
+    system = (
+        "You are a live-commerce action decision engine. "
+        "Return only compact valid JSON. Do not include markdown. "
+        "Use only candidate SKUs and promo codes from the input. "
+        "Use null when evidence is insufficient."
+    )
+    user = (
+        "Decide commerce actions from this transcript window. "
+        "Expected JSON keys are product_sku, product_confidence, promo_code, "
+        "promo_confidence, bundle_skus, bundle_confidence, flash_minutes, "
+        "flash_confidence. Confidence values must be between 0 and 1.\n\n"
+        f"Input:\n{json.dumps(payload, ensure_ascii=False)}"
+    )
+    return [
+        {"role": "system", "content": system},
+        {"role": "user", "content": user},
+    ]
+
+
+def extract_json_mapping(text: str) -> Mapping[str, Any]:
+    cleaned = (text or "").strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"\s*```$", "", cleaned)
+    try:
+        parsed = json.loads(cleaned)
+    except json.JSONDecodeError:
+        match = re.search(r"\{.*\}", cleaned, flags=re.DOTALL)
+        if not match:
+            raise
+        parsed = json.loads(match.group(0))
+    if not isinstance(parsed, RuntimeMapping):
+        raise TypeError("Typhoon-S decision output must be a JSON object")
+    return parsed
 
 
 def _decision_from_mapping(raw: Mapping[str, Any]) -> CommerceDecision:

@@ -7,6 +7,12 @@ import json
 import sys
 
 from src.ai.commerce_actions import generate_commerce_actions, load_caption_result, save_commerce_actions
+from src.ai.decision import (
+    DEFAULT_TYPHOON_S_MODEL_ID,
+    CommerceDecisionProvider,
+    DeterministicDecisionProvider,
+    TyphoonSDecisionProvider,
+)
 from src.data.catalog import load_product_catalog, load_promotions
 from src.utils.action_timeline import save_action_timeline_html
 
@@ -27,11 +33,27 @@ def run_actions_from_paths(
     promotions_path: Path,
     output_dir: Path,
     audio_path: Optional[Path] = None,
+    decision_provider: Optional[CommerceDecisionProvider] = None,
+    decision_provider_name: str = "deterministic",
+    decision_model: Optional[str] = None,
+    decision_max_new_tokens: int = 256,
+    decision_temperature: float = 0.1,
 ) -> Dict[str, Any]:
     captions = load_caption_result(captions_path)
     catalog = load_product_catalog(catalog_path)
     promotions = load_promotions(promotions_path)
-    actions = generate_commerce_actions(captions, catalog, promotions)
+    decision_provider = decision_provider or create_decision_provider(
+        provider_name=decision_provider_name,
+        model_id=decision_model,
+        max_new_tokens=decision_max_new_tokens,
+        temperature=decision_temperature,
+    )
+    actions = generate_commerce_actions(
+        captions,
+        catalog,
+        promotions,
+        decision_provider=decision_provider,
+    )
 
     output_dir.mkdir(parents=True, exist_ok=True)
     actions_path = output_dir / "commerce_actions.json"
@@ -41,6 +63,8 @@ def run_actions_from_paths(
 
     return {
         "action_count": len(actions),
+        "decision_provider": decision_provider_name,
+        "decision_model": decision_model,
         "actions": [action.to_dict() for action in actions],
         "outputs": {
             "json": str(actions_path),
@@ -68,7 +92,56 @@ def build_parser() -> ArgumentParser:
         default=None,
         help="Optional audio path for synchronized timeline HTML.",
     )
+    parser.add_argument(
+        "--decision-provider",
+        choices=["deterministic", "typhoon_s"],
+        default="deterministic",
+        help="Decision provider for commerce action extraction.",
+    )
+    parser.add_argument(
+        "--decision-model",
+        default=DEFAULT_TYPHOON_S_MODEL_ID,
+        help="Model id for --decision-provider typhoon_s.",
+    )
+    parser.add_argument(
+        "--decision-max-new-tokens",
+        type=int,
+        default=256,
+        help="Maximum new tokens for Typhoon-S decision JSON generation.",
+    )
+    parser.add_argument(
+        "--decision-temperature",
+        type=float,
+        default=0.1,
+        help="Generation temperature for Typhoon-S decision JSON generation.",
+    )
     return parser
+
+
+def build_decision_provider(args) -> Optional[CommerceDecisionProvider]:
+    return create_decision_provider(
+        provider_name=args.decision_provider,
+        model_id=args.decision_model,
+        max_new_tokens=args.decision_max_new_tokens,
+        temperature=args.decision_temperature,
+    )
+
+
+def create_decision_provider(
+    provider_name: str = "deterministic",
+    model_id: Optional[str] = None,
+    max_new_tokens: int = 256,
+    temperature: float = 0.1,
+) -> CommerceDecisionProvider:
+    if provider_name == "deterministic":
+        return DeterministicDecisionProvider()
+    if provider_name == "typhoon_s":
+        return TyphoonSDecisionProvider(
+            model_id=model_id or DEFAULT_TYPHOON_S_MODEL_ID,
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+        )
+    raise ValueError(f"unsupported decision provider: {provider_name}")
 
 
 def main() -> None:
@@ -79,6 +152,11 @@ def main() -> None:
         promotions_path=resolve_repo_path(args.promotions) or Path(args.promotions),
         output_dir=resolve_repo_path(args.output_dir) or Path(args.output_dir),
         audio_path=resolve_repo_path(args.audio) if args.audio else None,
+        decision_provider=build_decision_provider(args),
+        decision_provider_name=args.decision_provider,
+        decision_model=args.decision_model if args.decision_provider == "typhoon_s" else None,
+        decision_max_new_tokens=args.decision_max_new_tokens,
+        decision_temperature=args.decision_temperature,
     )
     payload = json.dumps(summary, indent=2, ensure_ascii=False) + "\n"
     sys.stdout.buffer.write(payload.encode("utf-8"))

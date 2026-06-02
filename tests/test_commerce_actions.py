@@ -25,10 +25,14 @@ from src.ai.decision import (
     CommerceCandidates,
     CommerceDecision,
     CommerceSessionState,
+    DEFAULT_TYPHOON_S_MODEL_ID,
     TranscriptWindow,
+    TyphoonSDecisionProvider,
+    extract_json_mapping,
 )
 from src.ai.retrieval import ProductPromoRetriever
 from src.data.catalog import load_product_catalog, load_promotions
+from src.pipeline.run_commerce_actions import create_decision_provider
 from src.schemas import CaptionResult, CaptionSegment, ProductCatalogItem
 from src.utils.action_timeline import build_action_timeline_html
 
@@ -209,6 +213,65 @@ class CommerceActionTests(unittest.TestCase):
         self.assertEqual(decision.promo_code, "LIVE25")
         self.assertEqual(decision.bundle_skus, ["SKU002", "SKU001"])
         self.assertEqual(decision.flash_minutes, 5)
+
+    def test_typhoon_s_provider_accepts_json_output(self) -> None:
+        def fake_generator(messages):
+            return """
+            ```json
+            {
+              "product_sku": "SKU002",
+              "product_confidence": 0.92,
+              "promo_code": "LIVE25",
+              "promo_confidence": 0.81,
+              "bundle_skus": ["SKU002", "SKU001"],
+              "bundle_confidence": 0.88,
+              "flash_minutes": 5,
+              "flash_confidence": 0.77
+            }
+            ```
+            """
+
+        provider = TyphoonSDecisionProvider(text_generator=fake_generator)
+        decision = provider.decide(
+            TranscriptWindow(index=0, start=0.0, text="test"),
+            CommerceCandidates(products=[], bundle_products=[], promotions=[]),
+            CommerceSessionState(),
+            self.catalog,
+            self.promotions,
+        )
+        self.assertEqual(decision.product_sku, "SKU002")
+        self.assertEqual(decision.promo_code, "LIVE25")
+        self.assertEqual(decision.bundle_skus, ["SKU002", "SKU001"])
+        self.assertEqual(decision.flash_minutes, 5)
+
+    def test_typhoon_s_provider_falls_back_on_invalid_json(self) -> None:
+        provider = TyphoonSDecisionProvider(text_generator=lambda messages: "not json")
+        window = TranscriptWindow(index=0, start=0.0, text="Green Tea Cleanser")
+        candidates = CommerceCandidates(
+            products=ProductPromoRetriever.build(self.catalog, self.promotions).retrieve_products(
+                "Green Tea Cleanser",
+                top_k=5,
+            ),
+            bundle_products=[],
+            promotions=[],
+        )
+        decision = provider.decide(
+            window,
+            candidates,
+            CommerceSessionState(),
+            self.catalog,
+            self.promotions,
+        )
+        self.assertEqual(decision.product_sku, "SKU002")
+
+    def test_typhoon_s_json_extraction_accepts_wrapped_text(self) -> None:
+        parsed = extract_json_mapping('extra {"product_sku": "SKU001"} text')
+        self.assertEqual(parsed["product_sku"], "SKU001")
+
+    def test_create_decision_provider_supports_typhoon_s(self) -> None:
+        provider = create_decision_provider("typhoon_s")
+        self.assertIsInstance(provider, TyphoonSDecisionProvider)
+        self.assertEqual(provider.model_id, DEFAULT_TYPHOON_S_MODEL_ID)
 
     def test_retrieval_scales_to_10k_skus(self) -> None:
         synthetic_catalog = _synthetic_catalog(10_000)

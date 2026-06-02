@@ -1,0 +1,5 @@
+# Optional dependencies for local AI action decisions.
+# The deterministic commerce action path does not require these packages.
+torch>=2.1.0
+transformers>=4.57.0,<5
+accelerate>=0.26.0
