@@ -17,6 +17,8 @@ BUNDLE_CUES = [
     "\u0e43\u0e0a\u0e49\u0e04\u0e39\u0e48",
     "\u0e15\u0e32\u0e21\u0e14\u0e49\u0e27\u0e22",
     "\u0e01\u0e48\u0e2d\u0e19\u0e41\u0e25\u0e49\u0e27",
+    "\u0e04\u0e39\u0e48\u0e01\u0e31\u0e1a",
+    "bundle",
     "routine",
     "\u0e23\u0e39\u0e17\u0e34\u0e19",
 ]
@@ -72,8 +74,6 @@ class CommerceDecision:
     bundle_confidence: float = 0.0
     flash_minutes: Optional[int] = None
     flash_confidence: float = 0.0
-    original_price: Optional[int] = None
-    discount_price: Optional[int] = None
 
 
 class CommerceDecisionProvider(Protocol):
@@ -246,6 +246,7 @@ class DeterministicDecisionProvider:
                 state,
                 catalog,
                 self.bundle_threshold,
+                window.lookahead_text,
             )
 
         flash_minutes = extract_flash_minutes(window.lookahead_text if has_flash_cue(window.text) else window.text)
@@ -360,7 +361,7 @@ def _model_payload(
         ],
         "expected_output": {
             "action_type": (
-                "NO_ACTION|PIN_PRODUCT_CARD|SHOW_PRICE_DROP|SHOW_PROMO_CODE|"
+                "NO_ACTION|PIN_PRODUCT_CARD|SHOW_PROMO_CODE|"
                 "SHOW_BUNDLE_RECOMMENDATION|START_FLASH_SALE_COUNTDOWN"
             ),
             "confidence": "float",
@@ -372,8 +373,6 @@ def _model_payload(
             "bundle_confidence": "float",
             "flash_minutes": "int|null",
             "flash_confidence": "float",
-            "original_price": "int|null",
-            "discount_price": "int|null",
         },
     }
 
@@ -394,11 +393,10 @@ def _typhoon_messages(payload: Mapping[str, Any]) -> List[Mapping[str, str]]:
         "Decide commerce actions from this transcript window. "
         "Return exactly one JSON object with action_type and the fields needed "
         "for that one action. action_type must be one of NO_ACTION, "
-        "PIN_PRODUCT_CARD, SHOW_PRICE_DROP, SHOW_PROMO_CODE, "
+        "PIN_PRODUCT_CARD, SHOW_PROMO_CODE, "
         "SHOW_BUNDLE_RECOMMENDATION, START_FLASH_SALE_COUNTDOWN. "
-        "For PIN_PRODUCT_CARD use product_sku. For SHOW_PRICE_DROP use "
-        "product_sku, original_price, and discount_price. For SHOW_PROMO_CODE "
-        "use promo_code. For SHOW_BUNDLE_RECOMMENDATION use bundle_skus. "
+        "For PIN_PRODUCT_CARD use product_sku. For SHOW_PROMO_CODE use "
+        "promo_code. For SHOW_BUNDLE_RECOMMENDATION use bundle_skus. "
         "For START_FLASH_SALE_COUNTDOWN use flash_minutes. Confidence values "
         "must be between 0 and 1.\n\n"
         f"Input:\n{json.dumps(payload, ensure_ascii=False)}"
@@ -450,8 +448,6 @@ def _decision_from_mapping(raw: Mapping[str, Any]) -> CommerceDecision:
         bundle_confidence=_optional_float(raw.get("bundle_confidence")) or confidence,
         flash_minutes=None if flash_minutes is None else int(flash_minutes),
         flash_confidence=_optional_float(raw.get("flash_confidence")) or confidence,
-        original_price=_optional_int(raw.get("original_price")),
-        discount_price=_optional_int(raw.get("discount_price")),
     )
 
 
@@ -471,10 +467,6 @@ def _optional_float(value: Any) -> float:
     return 0.0 if value in (None, "") else float(value)
 
 
-def _optional_int(value: Any) -> Optional[int]:
-    return None if value in (None, "") else int(value)
-
-
 def _first_above(candidates, threshold: float):
     if not candidates:
         return None
@@ -487,6 +479,7 @@ def _decide_bundle(
     state: CommerceSessionState,
     catalog: Sequence[ProductCatalogItem],
     threshold: float,
+    text: str = "",
 ) -> tuple[Optional[List[str]], float]:
     skus: List[str] = []
     confidence = 0.0
@@ -497,14 +490,71 @@ def _decide_bundle(
             skus.append(candidate.item.sku)
             confidence = max(confidence, candidate.score)
         if len(skus) == 2:
-            return skus, max(0.89, confidence)
+            return _order_skus_by_mention(skus, candidates, catalog, text), max(0.89, confidence)
 
     if len(skus) == 1:
         partner = _latest_compatible_history_sku(skus[0], state.mentioned_skus, catalog)
         if partner:
-            return [skus[0], partner], max(0.84, confidence)
+            return _order_skus_by_mention([skus[0], partner], candidates, catalog, text), max(0.84, confidence)
 
     return None, 0.0
+
+
+def _order_skus_by_mention(
+    skus: Sequence[str],
+    candidates: Sequence[ProductCandidate],
+    catalog: Sequence[ProductCatalogItem],
+    text: str,
+) -> List[str]:
+    positions = {
+        candidate.item.sku: _product_mention_position(candidate.item, text)
+        for candidate in candidates
+    }
+    catalog_by_sku = {item.sku: item for item in catalog}
+    for sku in skus:
+        if sku not in positions and sku in catalog_by_sku:
+            positions[sku] = _product_mention_position(catalog_by_sku[sku], text)
+    return sorted(
+        list(skus),
+        key=lambda sku: (
+            positions.get(sku) is None,
+            positions.get(sku, 10**9),
+            skus.index(sku),
+        ),
+    )
+
+
+def _product_mention_position(item: ProductCatalogItem, text: str) -> Optional[int]:
+    query = normalize_search_text(text)
+    query_compact = query.replace(" ", "")
+    terms = _product_mention_terms(item)
+    positions = [
+        position
+        for term in terms
+        for position in [query_compact.find(term)]
+        if position >= 0
+    ]
+    return min(positions) if positions else None
+
+
+def _product_mention_terms(item: ProductCatalogItem) -> List[str]:
+    raw_terms = [
+        item.product_name,
+        item.brand,
+        *item.tags,
+        *[tag.replace("_", " ") for tag in item.tags],
+    ]
+    terms = []
+    for raw_term in raw_terms:
+        compact = normalize_search_text(raw_term).replace(" ", "")
+        if len(compact) >= 4:
+            terms.append(compact)
+        terms.extend(
+            token
+            for token in normalize_search_text(raw_term).split()
+            if len(token) >= 4
+        )
+    return sorted(set(terms), key=len, reverse=True)
 
 
 def _latest_compatible_history_sku(

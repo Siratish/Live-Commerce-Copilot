@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence
 import json
 
 from src.ai.captioning import load_cached_transcript
@@ -14,12 +14,11 @@ from src.ai.decision import (
     TranscriptWindow,
     has_bundle_cue,
 )
-from src.ai.retrieval import ProductPromoRetriever, extract_numbers
-from src.schemas import CaptionResult, CaptionSegment, CommerceAction, ProductCatalogItem, Promotion
+from src.ai.retrieval import ProductPromoRetriever
+from src.schemas import CaptionResult, CommerceAction, ProductCatalogItem, Promotion
 
 
 PIN_PRODUCT_CARD = "PIN_PRODUCT_CARD"
-SHOW_PRICE_DROP = "SHOW_PRICE_DROP"
 SHOW_PROMO_CODE = "SHOW_PROMO_CODE"
 SHOW_BUNDLE_RECOMMENDATION = "SHOW_BUNDLE_RECOMMENDATION"
 START_FLASH_SALE_COUNTDOWN = "START_FLASH_SALE_COUNTDOWN"
@@ -81,10 +80,11 @@ def generate_commerce_actions(
             previous_texts=previous_texts,
         )
         bundle_text = window.lookahead_text if has_bundle_cue(segment.text) else segment.text
+        promotion_text = _promotion_context_text(segment.text, state.active_sku, catalog_by_sku)
         candidates = CommerceCandidates(
             products=retriever.retrieve_products(segment.text, top_k=5),
             bundle_products=retriever.retrieve_products(bundle_text, top_k=5),
-            promotions=retriever.retrieve_promotions(segment.text, top_k=5),
+            promotions=retriever.retrieve_promotions(promotion_text, top_k=5),
         )
         decision = decision_provider.decide(window, candidates, state, catalog, promotions)
 
@@ -112,32 +112,6 @@ def generate_commerce_actions(
                                 display_payload={
                                     "title": "Pin product card",
                                     "product": _product_payload(product),
-                                },
-                            )
-                        )
-
-            if _should_emit(decision, SHOW_PRICE_DROP):
-                price_window = _find_price_window(captions.segments, index, product)
-                has_model_price = _price_decision_matches_catalog(decision, product)
-                if price_window or has_model_price:
-                    timestamp, evidence = price_window or (segment.start, segment.text)
-                    price_key = (SHOW_PRICE_DROP, product.sku)
-                    if price_key not in emitted:
-                        emitted.add(price_key)
-                        actions.append(
-                            CommerceAction(
-                                timestamp=timestamp,
-                                action_type=SHOW_PRICE_DROP,
-                                skus=[product.sku],
-                                confidence=_price_confidence(decision),
-                                evidence_text=evidence,
-                                display_payload={
-                                    "title": "Live price drop",
-                                    "sku": product.sku,
-                                    "product_name": product.product_name,
-                                    "original_price": product.price,
-                                    "discount_price": product.discount_price,
-                                    "currency": "THB",
                                 },
                             )
                         )
@@ -240,52 +214,28 @@ def _product_payload(item: ProductCatalogItem) -> Dict[str, Any]:
     }
 
 
-def _find_price_window(
-    segments: Sequence[CaptionSegment],
-    start_index: int,
-    item: ProductCatalogItem,
-    window: int = 3,
-) -> Optional[Tuple[float, str]]:
-    window_segments = segments[start_index : start_index + window]
-    original_index = None
-    discount_index = None
-    evidence: List[str] = []
-
-    for offset, segment in enumerate(window_segments):
-        numbers = extract_numbers(segment.text)
-        if item.price in numbers and original_index is None:
-            original_index = start_index + offset
-            evidence.append(segment.text)
-        if item.discount_price in numbers and discount_index is None:
-            discount_index = start_index + offset
-            evidence.append(segment.text)
-
-    if original_index is None or discount_index is None:
-        return None
-
-    timestamp = (
-        segments[discount_index].start
-        if original_index == start_index
-        else segments[original_index].start
+def _promotion_context_text(
+    text: str,
+    active_sku: Optional[str],
+    catalog_by_sku: Dict[str, ProductCatalogItem],
+) -> str:
+    if not active_sku or active_sku not in catalog_by_sku:
+        return text
+    item = catalog_by_sku[active_sku]
+    context = " ".join(
+        [
+            item.sku,
+            item.product_name,
+            item.brand,
+            item.category,
+            *item.tags,
+        ]
     )
-    return timestamp, " ".join(evidence)
+    return f"{text} {context}".strip()
 
 
 def _should_emit(decision: CommerceDecision, action_type: str) -> bool:
     return decision.action_type is None or decision.action_type == action_type
-
-
-def _price_decision_matches_catalog(
-    decision: CommerceDecision,
-    item: ProductCatalogItem,
-) -> bool:
-    return decision.original_price == item.price and decision.discount_price == item.discount_price
-
-
-def _price_confidence(decision: CommerceDecision) -> float:
-    if decision.action_type == SHOW_PRICE_DROP:
-        return round(decision.product_confidence or decision.confidence, 3)
-    return 0.95
 
 
 def _valid_bundle(

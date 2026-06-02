@@ -48,7 +48,14 @@ def compact_search_text(text: str) -> str:
 
 
 def extract_numbers(text: str) -> List[int]:
-    return [int(value) for value in NUMBER_RE.findall((text or "").translate(THAI_DIGITS))]
+    normalized = (text or "").translate(THAI_DIGITS)
+    normalized = re.sub(r"(?<=\d),(?=\d)", "", normalized)
+    values = [int(value) for value in NUMBER_RE.findall(normalized)]
+    for match in re.finditer(r"\d(?:[\s-]+\d{1,3})+", normalized):
+        compact = re.sub(r"\D", "", match.group(0))
+        if compact:
+            values.append(int(compact))
+    return values
 
 
 def char_ngrams(text: str, n: int = 3) -> Set[str]:
@@ -242,14 +249,30 @@ def _score_promotion_record(
     query_numbers: Sequence[int],
 ) -> float:
     promotion = record.obj
+    promo_numbers = extract_numbers(promotion.promo_code) + [promotion.discount_value]  # type: ignore[attr-defined]
+    if not _has_promo_intent(record.primary_compact, query_compact, query_numbers, promo_numbers):
+        return 0.0
+
     score = max(
         dice_similarity(query_ngrams, record.ngrams),
         best_substring_similarity(query_compact, record.primary_compact),
     )
-    promo_numbers = extract_numbers(promotion.promo_code) + [promotion.discount_value]  # type: ignore[attr-defined]
-    if _has_code_cue(query_compact) and set(query_numbers).intersection(promo_numbers):
-        score = max(score, min(0.95, score + 0.35))
+    if set(query_numbers).intersection(promo_numbers):
+        score = max(score, min(0.95, score + 0.35), 0.8)
     return score
+
+
+def _has_promo_intent(
+    promo_code_compact: str,
+    query_compact: str,
+    query_numbers: Sequence[int],
+    promo_numbers: Sequence[int],
+) -> bool:
+    if promo_code_compact and promo_code_compact in query_compact:
+        return True
+    if not set(query_numbers).intersection(promo_numbers):
+        return False
+    return _has_code_cue(query_compact) or _has_discount_cue(query_compact)
 
 
 def _has_code_cue(query_compact: str) -> bool:
@@ -259,7 +282,20 @@ def _has_code_cue(query_compact: str) -> bool:
             "code",
             "promo",
             "promotion",
+            "coupon",
             compact_search_text("\u0e42\u0e04\u0e49\u0e14"),
+            compact_search_text("\u0e04\u0e39\u0e1b\u0e2d\u0e07"),
+            compact_search_text("\u0e42\u0e1b\u0e23"),
+        ]
+    )
+
+
+def _has_discount_cue(query_compact: str) -> bool:
+    return any(
+        cue in query_compact
+        for cue in [
             compact_search_text("\u0e2a\u0e48\u0e27\u0e19\u0e25\u0e14"),
+            compact_search_text("\u0e25\u0e14"),
+            "discount",
         ]
     )

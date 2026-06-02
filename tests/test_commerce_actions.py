@@ -12,7 +12,6 @@ import src.ai.commerce_actions as commerce_actions
 from src.ai.commerce_actions import (
     PIN_PRODUCT_CARD,
     SHOW_BUNDLE_RECOMMENDATION,
-    SHOW_PRICE_DROP,
     SHOW_PROMO_CODE,
     START_FLASH_SALE_COUNTDOWN,
     eligible_items_for_promotion,
@@ -31,7 +30,7 @@ from src.ai.decision import (
     TyphoonSDecisionProvider,
     extract_json_mapping,
 )
-from src.ai.retrieval import ProductPromoRetriever
+from src.ai.retrieval import ProductPromoRetriever, extract_numbers
 from src.data.catalog import load_product_catalog, load_promotions
 from src.pipeline.run_commerce_actions import create_decision_provider
 from src.schemas import CaptionResult, CaptionSegment, ProductCatalogItem
@@ -59,27 +58,33 @@ class CommerceActionTests(unittest.TestCase):
             sequence,
             [
                 (PIN_PRODUCT_CARD, ["SKU001"], 8.30),
-                (SHOW_PRICE_DROP, ["SKU001"], 13.80),
                 (SHOW_PROMO_CODE, ["SKU001", "SKU002", "SKU007"], 29.36),
                 (PIN_PRODUCT_CARD, ["SKU002"], 49.08),
-                (SHOW_PRICE_DROP, ["SKU002"], 53.68),
                 (SHOW_BUNDLE_RECOMMENDATION, ["SKU002", "SKU001"], 63.08),
                 (START_FLASH_SALE_COUNTDOWN, ["SKU002", "SKU001"], 70.58),
             ],
         )
 
-    def test_price_extraction_payloads(self) -> None:
-        price_actions = [action for action in self.actions if action.action_type == SHOW_PRICE_DROP]
-        self.assertEqual(price_actions[0].display_payload["original_price"], 399)
-        self.assertEqual(price_actions[0].display_payload["discount_price"], 299)
-        self.assertEqual(price_actions[1].display_payload["original_price"], 259)
-        self.assertEqual(price_actions[1].display_payload["discount_price"], 199)
+    def test_product_cards_include_catalog_prices(self) -> None:
+        product_cards = [action for action in self.actions if action.action_type == PIN_PRODUCT_CARD]
+        first_product = product_cards[0].display_payload["product"]
+        second_product = product_cards[1].display_payload["product"]
+        self.assertEqual(first_product["price"], 399)
+        self.assertEqual(first_product["discount_price"], 299)
+        self.assertEqual(second_product["price"], 259)
+        self.assertEqual(second_product["discount_price"], 199)
 
     def test_promo_normalization_variants(self) -> None:
         self.assertEqual(normalize_promo_code("Code Life 25", self.promotions), "LIVE25")
         self.assertEqual(normalize_promo_code("Code Life 2-5", self.promotions), "LIVE25")
         self.assertEqual(normalize_promo_code("ใช้ Live 25", self.promotions), "LIVE25")
         self.assertEqual(normalize_promo_code("โค้ดไลฟ์ 25", self.promotions), "LIVE25")
+        self.assertIsNone(normalize_promo_code("True ID Tech Live Deal", self.promotions))
+
+    def test_number_extraction_handles_comma_and_split_digits(self) -> None:
+        self.assertIn(1290, extract_numbers("ราคาเต็ม 1,290 บาท"))
+        self.assertIn(25, extract_numbers("Code Life 2-5"))
+        self.assertIn(100, extract_numbers("โค้ดเทก 1 00 ลดเพิ่มอีก 100 บาท"))
 
     def test_promotion_eligibility_is_separate_from_product_catalog(self) -> None:
         live25 = next(promotion for promotion in self.promotions if promotion.promo_code == "LIVE25")
@@ -133,7 +138,7 @@ class CommerceActionTests(unittest.TestCase):
                 capture_output=True,
             )
             summary = json.loads(completed.stdout.decode("utf-8"))
-            self.assertEqual(summary["action_count"], 7)
+            self.assertEqual(summary["action_count"], 5)
             self.assertTrue((Path(temp_dir) / "commerce_actions.json").exists())
             self.assertTrue((Path(temp_dir) / "commerce_actions_timeline.html").exists())
 
@@ -151,14 +156,72 @@ class CommerceActionTests(unittest.TestCase):
             sequence,
             [
                 (PIN_PRODUCT_CARD, ["SKU001"], 7.86),
-                (SHOW_PRICE_DROP, ["SKU001"], 13.58),
                 (SHOW_PROMO_CODE, ["SKU001", "SKU002", "SKU007"], 29.34),
                 (PIN_PRODUCT_CARD, ["SKU002"], 49.04),
-                (SHOW_PRICE_DROP, ["SKU002"], 53.64),
                 (SHOW_BUNDLE_RECOMMENDATION, ["SKU002", "SKU001"], 62.94),
                 (START_FLASH_SALE_COUNTDOWN, ["SKU002", "SKU001"], 70.44),
             ],
         )
+
+    def test_audio2_tech_transcript_generates_expected_actions(self) -> None:
+        captions = CaptionResult(
+            language="th",
+            duration_seconds=80.48,
+            segments=[
+                CaptionSegment(
+                    start=0.0,
+                    end=6.16,
+                    text="สวัสดีครับทุกคน วันนี้เราอยู่กับ True ID Tech Live Deal สำหรับคนที่ใช้มือถือทุกวันนะครับ",
+                    source="test",
+                ),
+                CaptionSegment(
+                    start=6.16,
+                    end=14.64,
+                    text="สินค้าตัวแรกคือ Fast Charge Power Bank 1 000-0-0-0-0-MH จาก Demotech ปกติราคา 799 บาท",
+                    source="test",
+                ),
+                CaptionSegment(
+                    start=14.64,
+                    end=21.92,
+                    text="วันนี้ลดเหลือ 599 บาท ตัวนี้รองรับ Fast Charging และมีพอร์ต USB-C เหมาะสำหรับคนที่เดินทางบ่อย",
+                    source="test",
+                ),
+                CaptionSegment(
+                    start=21.92,
+                    end=29.84,
+                    text="หรือดูวิดีโอบนมือถือเป็นเวลานานครับ ใช้โคตรเทกส 1 00 ลดเพิ่มอีก 100 บาท เมื่อซื้อผ่าน Live นี้นะครับ",
+                    source="test",
+                ),
+                CaptionSegment(
+                    start=36.88,
+                    end=49.32,
+                    text="ในกล่องมีเฉพาะ Power Bank และคู่มือการใช้งานครับ ต่อไปเป็น Wireless Earbuds Lite จาก Demo Sound ราคาเต็ม 1,290 บาท วันนี้ลดเหลือ 990 บาท",
+                    source="test",
+                ),
+                CaptionSegment(
+                    start=71.36,
+                    end=80.48,
+                    text="สำหรับ BUNDLE ผมแนะนำ Power Bank คู่กับ Wireless Earbuds เพราะเหมาะกับคนเดินทาง ดูหนัง ฟังเพลง และไม่อยากให้แบดหมดระหว่างวันครับ",
+                    source="test",
+                ),
+            ],
+        )
+        actions = generate_commerce_actions(captions, self.catalog, self.promotions)
+        sequence = [(action.action_type, action.skus, round(action.timestamp, 2)) for action in actions]
+        self.assertEqual(
+            sequence,
+            [
+                (PIN_PRODUCT_CARD, ["SKU005"], 6.16),
+                (SHOW_PROMO_CODE, ["SKU005", "SKU006", "SKU008"], 21.92),
+                (PIN_PRODUCT_CARD, ["SKU006"], 36.88),
+                (SHOW_BUNDLE_RECOMMENDATION, ["SKU005", "SKU006"], 71.36),
+            ],
+        )
+        promo = next(action for action in actions if action.action_type == SHOW_PROMO_CODE)
+        self.assertEqual(promo.display_payload["promo_code"], "TECH100")
+        earbuds_card = next(action for action in actions if action.skus == ["SKU006"])
+        self.assertEqual(earbuds_card.display_payload["product"]["price"], 1290)
+        self.assertEqual(earbuds_card.display_payload["product"]["discount_price"], 990)
 
     def test_invalid_model_decisions_are_rejected_by_validation(self) -> None:
         class BadDecisionProvider:
@@ -293,8 +356,6 @@ class CommerceActionTests(unittest.TestCase):
                     product_confidence=0.9,
                     promo_code="LIVE25",
                     promo_confidence=0.9,
-                    original_price=399,
-                    discount_price=299,
                 )
 
         captions = CaptionResult(
@@ -318,15 +379,13 @@ class CommerceActionTests(unittest.TestCase):
 
         self.assertEqual([action.action_type for action in actions], [PIN_PRODUCT_CARD])
 
-    def test_model_price_drop_action_can_use_validated_price_details(self) -> None:
-        class PriceActionProvider:
+    def test_model_unsupported_action_type_is_ignored(self) -> None:
+        class UnsupportedActionProvider:
             def decide(self, window, candidates, state, catalog, promotions):
                 return CommerceDecision(
-                    action_type=SHOW_PRICE_DROP,
+                    action_type="UNSUPPORTED_PRICE_ACTION",
                     confidence=0.88,
                     product_sku="SKU001",
-                    original_price=399,
-                    discount_price=299,
                 )
 
         captions = CaptionResult(
@@ -345,12 +404,10 @@ class CommerceActionTests(unittest.TestCase):
             captions,
             self.catalog,
             self.promotions,
-            decision_provider=PriceActionProvider(),
+            decision_provider=UnsupportedActionProvider(),
         )
 
-        self.assertEqual([action.action_type for action in actions], [SHOW_PRICE_DROP])
-        self.assertEqual(actions[0].display_payload["original_price"], 399)
-        self.assertEqual(actions[0].display_payload["discount_price"], 299)
+        self.assertEqual(actions, [])
 
     def test_typhoon_s_provider_accepts_json_output(self) -> None:
         def fake_generator(messages):
