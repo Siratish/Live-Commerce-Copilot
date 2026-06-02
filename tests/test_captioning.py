@@ -6,14 +6,17 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from src.ai.captioning import (
+    AudioWindow,
     available_asr_models,
     captions_to_srt,
     captions_to_webvtt,
     load_cached_transcript,
     resolve_asr_model_id,
     safe_whisper_max_new_tokens,
+    transcribe_audio_windows,
     write_caption_outputs,
 )
 from src.schemas import CaptionSegment, repair_caption_timestamps, validate_caption_segments
@@ -79,6 +82,7 @@ class CaptioningTests(unittest.TestCase):
             self.assertEqual(summary["language"], "th")
             self.assertEqual(summary["asr_provider"], "openai_whisper")
             self.assertEqual(summary["asr_model"], "large")
+            self.assertEqual(summary["asr_chunk_length_seconds"], 4)
             self.assertEqual(summary["asr_max_new_tokens"], 440)
             self.assertTrue(summary["audio_path"].endswith("data\\demo\\audio\\1.mp3") or summary["audio_path"].endswith("data/demo/audio/1.mp3"))
             self.assertTrue((Path(temp_dir) / "captions.json").exists())
@@ -107,6 +111,30 @@ class CaptioningTests(unittest.TestCase):
             )
             summary = json.loads(completed.stdout)
             self.assertEqual(summary["asr_max_new_tokens"], 256)
+
+    def test_cli_accepts_asr_chunk_length_override(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "src.pipeline.run_captioning_demo",
+                    "--config",
+                    str(CONFIG),
+                    "--mode",
+                    "cached",
+                    "--asr-chunk-length-seconds",
+                    "6",
+                    "--output-dir",
+                    temp_dir,
+                ],
+                cwd=REPO_ROOT,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            summary = json.loads(completed.stdout)
+            self.assertEqual(summary["asr_chunk_length_seconds"], 6)
 
     def test_cli_lists_asr_model_aliases(self) -> None:
         completed = subprocess.run(
@@ -156,6 +184,60 @@ class CaptioningTests(unittest.TestCase):
         self.assertEqual(safe_whisper_max_new_tokens(999, 448), 440)
         self.assertEqual(safe_whisper_max_new_tokens(128, 448), 128)
         self.assertEqual(safe_whisper_max_new_tokens(256, None), 256)
+
+    def test_typhoon_audio_windows_create_timed_segments_without_text_splitting(self) -> None:
+        windows = [
+            AudioWindow(0.0, 4.0, [0.0], 16_000),
+            AudioWindow(4.0, 8.0, [0.0], 16_000),
+        ]
+
+        class FakePipe:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def __call__(self, audio, generate_kwargs):
+                self.calls += 1
+                return {"text": f"chunk {self.calls}"}
+
+        fake_pipe = FakePipe()
+        with patch("src.ai.captioning.iter_audio_windows", return_value=iter(windows)):
+            segments = transcribe_audio_windows(
+                pipe=fake_pipe,
+                audio_path=Path("demo.mp3"),
+                language="th",
+                source="typhoon_whisper:test",
+                chunk_length_seconds=4,
+                max_new_tokens=440,
+            )
+
+        self.assertEqual(
+            [(segment.start, segment.end, segment.text) for segment in segments],
+            [(0.0, 4.0, "chunk 1"), (4.0, 8.0, "chunk 2")],
+        )
+
+    def test_typhoon_chunk_timestamps_are_offset_by_audio_window(self) -> None:
+        windows = [AudioWindow(8.0, 12.0, [0.0], 16_000)]
+
+        def fake_pipe(audio, generate_kwargs):
+            return {
+                "chunks": [
+                    {"timestamp": (0.5, 1.5), "text": "inside window"},
+                ]
+            }
+
+        with patch("src.ai.captioning.iter_audio_windows", return_value=iter(windows)):
+            segments = transcribe_audio_windows(
+                pipe=fake_pipe,
+                audio_path=Path("demo.mp3"),
+                language="th",
+                source="typhoon_whisper:test",
+                chunk_length_seconds=4,
+                max_new_tokens=440,
+            )
+
+        self.assertEqual(segments[0].start, 8.5)
+        self.assertEqual(segments[0].end, 9.5)
+        self.assertEqual(segments[0].text, "inside window")
 
     def test_realtime_caption_html_embeds_audio_and_segments(self) -> None:
         result = load_cached_transcript(CACHED_TRANSCRIPT)

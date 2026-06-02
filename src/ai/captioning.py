@@ -2,9 +2,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 import json
 import shutil
+import subprocess
 
 from src.schemas import (
     CaptionResult,
@@ -41,6 +42,14 @@ TYPHOON_WHISPER_MODELS: Dict[str, str] = {
 
 
 @dataclass(frozen=True)
+class AudioWindow:
+    start: float
+    end: float
+    samples: Any
+    sample_rate: int
+
+
+@dataclass(frozen=True)
 class CaptioningSettings:
     mode: str = "cached"
     language: str = "en"
@@ -49,7 +58,7 @@ class CaptioningSettings:
     asr_provider: str = "openai_whisper"
     asr_model: Optional[str] = None
     whisper_model: str = "tiny"
-    asr_chunk_length_seconds: int = 30
+    asr_chunk_length_seconds: int = 4
     asr_batch_size: int = 16
     asr_max_new_tokens: int = 440
     allow_cached_fallback: bool = True
@@ -195,21 +204,18 @@ class CaptioningEngine:
                 torch_dtype=torch_dtype,
                 device=device,
             )
-            raw = pipe(
-                str(self.settings.audio_path),
-                generate_kwargs={
-                    "language": typhoon_language(self.settings.language),
-                    "max_new_tokens": max_new_tokens,
-                },
+            segments = transcribe_audio_windows(
+                pipe=pipe,
+                audio_path=self.settings.audio_path,
+                language=self.settings.language,
+                source=f"typhoon_whisper:{model_id}",
+                chunk_length_seconds=self.settings.asr_chunk_length_seconds,
+                max_new_tokens=max_new_tokens,
             )
         except Exception as exc:
             raise CaptioningUnavailable(
                 f"Typhoon Whisper inference failed for model {model_id!r}"
             ) from exc
-        segments = _segments_from_transformers_asr_result(
-            raw,
-            source=f"typhoon_whisper:{model_id}",
-        )
         duration = segments[-1].end if segments else None
         return CaptionResult(
             language=self.settings.language,
@@ -278,7 +284,107 @@ def safe_whisper_max_new_tokens(
     return max(1, min(requested, int(max_target_positions) - decoder_prompt_margin))
 
 
-def _segments_from_transformers_asr_result(raw: Any, source: str) -> List[CaptionSegment]:
+def transcribe_audio_windows(
+    pipe: Any,
+    audio_path: Path,
+    language: str,
+    source: str,
+    chunk_length_seconds: int,
+    max_new_tokens: int,
+) -> List[CaptionSegment]:
+    segments: List[CaptionSegment] = []
+    for window in iter_audio_windows(audio_path, chunk_length_seconds):
+        raw = pipe(
+            {"raw": window.samples, "sampling_rate": window.sample_rate},
+            generate_kwargs={
+                "language": typhoon_language(language),
+                "max_new_tokens": max_new_tokens,
+            },
+        )
+        segments.extend(
+            _segments_from_transformers_asr_result(
+                raw,
+                source=source,
+                offset_seconds=window.start,
+                fallback_start=window.start,
+                fallback_end=window.end,
+            )
+        )
+    return repair_caption_timestamps(segments)
+
+
+def iter_audio_windows(
+    audio_path: Path,
+    chunk_length_seconds: int,
+    sample_rate: int = 16_000,
+) -> Iterator[AudioWindow]:
+    try:
+        import numpy as np  # type: ignore
+    except ImportError as exc:
+        raise CaptioningUnavailable(
+            "Typhoon streaming-window transcription requires numpy"
+        ) from exc
+
+    chunk_seconds = max(0.1, float(chunk_length_seconds))
+    samples_per_window = max(1, int(sample_rate * chunk_seconds))
+    bytes_per_window = samples_per_window * 2
+    command = [
+        "ffmpeg",
+        "-nostdin",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-i",
+        str(audio_path),
+        "-ac",
+        "1",
+        "-ar",
+        str(sample_rate),
+        "-f",
+        "s16le",
+        "pipe:1",
+    ]
+    process = subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    if process.stdout is None:
+        raise CaptioningUnavailable("ffmpeg stdout pipe was not created")
+
+    start = 0.0
+    produced_windows = 0
+    while True:
+        data = process.stdout.read(bytes_per_window)
+        if not data:
+            break
+        samples = np.frombuffer(data, dtype=np.int16).astype(np.float32) / 32768.0
+        duration = float(len(samples)) / float(sample_rate)
+        if duration <= 0:
+            continue
+        end = start + duration
+        produced_windows += 1
+        yield AudioWindow(
+            start=start,
+            end=end,
+            samples=samples,
+            sample_rate=sample_rate,
+        )
+        start = end
+
+    stderr = process.stderr.read().decode("utf-8", errors="replace") if process.stderr else ""
+    return_code = process.wait()
+    if return_code and produced_windows == 0:
+        raise CaptioningUnavailable(f"ffmpeg failed to decode audio: {stderr.strip()}")
+
+
+def _segments_from_transformers_asr_result(
+    raw: Any,
+    source: str,
+    offset_seconds: float = 0.0,
+    fallback_start: float = 0.0,
+    fallback_end: Optional[float] = None,
+) -> List[CaptionSegment]:
     chunks = raw.get("chunks", []) if isinstance(raw, dict) else []
     segments = []
     for chunk in chunks:
@@ -287,8 +393,8 @@ def _segments_from_transformers_asr_result(raw: Any, source: str) -> List[Captio
         if text:
             segments.append(
                 CaptionSegment(
-                    start=start,
-                    end=end,
+                    start=offset_seconds + start,
+                    end=offset_seconds + end,
                     text=text,
                     source=source,
                     confidence=None,
@@ -300,8 +406,8 @@ def _segments_from_transformers_asr_result(raw: Any, source: str) -> List[Captio
         if text:
             segments.append(
                 CaptionSegment(
-                    start=0.0,
-                    end=0.05,
+                    start=fallback_start,
+                    end=fallback_end if fallback_end is not None else fallback_start + 0.05,
                     text=text,
                     source=source,
                     confidence=None,

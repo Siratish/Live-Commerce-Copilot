@@ -82,6 +82,7 @@ def run_from_config(
     output_dir_override: Optional[str] = None,
     asr_provider_override: Optional[str] = None,
     asr_model_override: Optional[str] = None,
+    asr_chunk_length_seconds_override: Optional[int] = None,
     asr_max_new_tokens_override: Optional[int] = None,
 ) -> Dict[str, Any]:
     config = load_config(config_path)
@@ -104,7 +105,11 @@ def run_from_config(
             else str(captioning.get("asr_model"))
         ),
         whisper_model=str(captioning.get("whisper_model", "tiny")),
-        asr_chunk_length_seconds=int(captioning.get("asr_chunk_length_seconds", 30)),
+        asr_chunk_length_seconds=int(
+            asr_chunk_length_seconds_override
+            if asr_chunk_length_seconds_override is not None
+            else captioning.get("asr_chunk_length_seconds", 4)
+        ),
         asr_batch_size=int(captioning.get("asr_batch_size", 16)),
         asr_max_new_tokens=int(
             asr_max_new_tokens_override
@@ -137,6 +142,7 @@ def run_from_config(
         "mode": settings.mode,
         "asr_provider": settings.asr_provider,
         "asr_model": settings.asr_model or settings.whisper_model,
+        "asr_chunk_length_seconds": settings.asr_chunk_length_seconds,
         "asr_max_new_tokens": settings.asr_max_new_tokens,
         "audio_path": str(settings.audio_path) if settings.audio_path else None,
         "metrics": metrics,
@@ -181,6 +187,12 @@ def build_parser() -> ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--asr-chunk-length-seconds",
+        type=int,
+        default=None,
+        help="Audio window size for Typhoon streaming ASR.",
+    )
+    parser.add_argument(
         "--list-asr-models",
         action="store_true",
         help="Print supported ASR model aliases and exit.",
@@ -204,6 +216,7 @@ def main() -> None:
         output_dir_override=args.output_dir,
         asr_provider_override=args.asr_provider,
         asr_model_override=args.asr_model,
+        asr_chunk_length_seconds_override=args.asr_chunk_length_seconds,
         asr_max_new_tokens_override=args.asr_max_new_tokens,
     )
     print(json.dumps(summary, indent=2))
