@@ -12,6 +12,8 @@ captioning:
   # Typhoon aliases: large-v3, turbo, medium, monsoon-medium, isan-medium
   asr_chunk_length_seconds: 30
   asr_batch_size: 16
+  # Whisper decoder context is 448 tokens; keep room for language/task tokens.
+  asr_max_new_tokens: 440
   allow_cached_fallback: true
 
 outputs:

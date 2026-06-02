@@ -13,6 +13,7 @@ from src.ai.captioning import (
     captions_to_webvtt,
     load_cached_transcript,
     resolve_asr_model_id,
+    safe_whisper_max_new_tokens,
     write_caption_outputs,
 )
 from src.schemas import CaptionSegment, repair_caption_timestamps, validate_caption_segments
@@ -78,9 +79,34 @@ class CaptioningTests(unittest.TestCase):
             self.assertEqual(summary["language"], "th")
             self.assertEqual(summary["asr_provider"], "openai_whisper")
             self.assertEqual(summary["asr_model"], "large")
+            self.assertEqual(summary["asr_max_new_tokens"], 440)
             self.assertTrue(summary["audio_path"].endswith("data\\demo\\audio\\1.mp3") or summary["audio_path"].endswith("data/demo/audio/1.mp3"))
             self.assertTrue((Path(temp_dir) / "captions.json").exists())
             self.assertTrue((Path(temp_dir) / "captions.vtt").exists())
+
+    def test_cli_accepts_asr_max_new_tokens_override(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "src.pipeline.run_captioning_demo",
+                    "--config",
+                    str(CONFIG),
+                    "--mode",
+                    "cached",
+                    "--asr-max-new-tokens",
+                    "256",
+                    "--output-dir",
+                    temp_dir,
+                ],
+                cwd=REPO_ROOT,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            summary = json.loads(completed.stdout)
+            self.assertEqual(summary["asr_max_new_tokens"], 256)
 
     def test_cli_lists_asr_model_aliases(self) -> None:
         completed = subprocess.run(
@@ -124,6 +150,12 @@ class CaptioningTests(unittest.TestCase):
             "some-org/new-thai-asr",
         )
         self.assertIn("typhoon_whisper", available_asr_models())
+
+    def test_safe_whisper_max_new_tokens_leaves_decoder_prompt_room(self) -> None:
+        self.assertEqual(safe_whisper_max_new_tokens(448, 448), 440)
+        self.assertEqual(safe_whisper_max_new_tokens(999, 448), 440)
+        self.assertEqual(safe_whisper_max_new_tokens(128, 448), 128)
+        self.assertEqual(safe_whisper_max_new_tokens(256, None), 256)
 
     def test_realtime_caption_html_embeds_audio_and_segments(self) -> None:
         result = load_cached_transcript(CACHED_TRANSCRIPT)

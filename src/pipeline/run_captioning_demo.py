@@ -82,6 +82,7 @@ def run_from_config(
     output_dir_override: Optional[str] = None,
     asr_provider_override: Optional[str] = None,
     asr_model_override: Optional[str] = None,
+    asr_max_new_tokens_override: Optional[int] = None,
 ) -> Dict[str, Any]:
     config = load_config(config_path)
     captioning = config.get("captioning", {})
@@ -105,6 +106,11 @@ def run_from_config(
         whisper_model=str(captioning.get("whisper_model", "tiny")),
         asr_chunk_length_seconds=int(captioning.get("asr_chunk_length_seconds", 30)),
         asr_batch_size=int(captioning.get("asr_batch_size", 16)),
+        asr_max_new_tokens=int(
+            asr_max_new_tokens_override
+            if asr_max_new_tokens_override is not None
+            else captioning.get("asr_max_new_tokens", 440)
+        ),
         allow_cached_fallback=bool(captioning.get("allow_cached_fallback", True)),
     )
     output_dir = (
@@ -131,6 +137,7 @@ def run_from_config(
         "mode": settings.mode,
         "asr_provider": settings.asr_provider,
         "asr_model": settings.asr_model or settings.whisper_model,
+        "asr_max_new_tokens": settings.asr_max_new_tokens,
         "audio_path": str(settings.audio_path) if settings.audio_path else None,
         "metrics": metrics,
         "outputs": {key: str(value) for key, value in paths.items()},
@@ -165,6 +172,15 @@ def build_parser() -> ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--asr-max-new-tokens",
+        type=int,
+        default=None,
+        help=(
+            "Maximum generated decoder tokens for Transformers Whisper models. "
+            "Values are clamped below the model decoder limit."
+        ),
+    )
+    parser.add_argument(
         "--list-asr-models",
         action="store_true",
         help="Print supported ASR model aliases and exit.",
@@ -188,6 +204,7 @@ def main() -> None:
         output_dir_override=args.output_dir,
         asr_provider_override=args.asr_provider,
         asr_model_override=args.asr_model,
+        asr_max_new_tokens_override=args.asr_max_new_tokens,
     )
     print(json.dumps(summary, indent=2))
 

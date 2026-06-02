@@ -51,6 +51,7 @@ class CaptioningSettings:
     whisper_model: str = "tiny"
     asr_chunk_length_seconds: int = 30
     asr_batch_size: int = 16
+    asr_max_new_tokens: int = 440
     allow_cached_fallback: bool = True
 
 
@@ -178,13 +179,16 @@ class CaptioningEngine:
                 use_safetensors=True,
             )
             model.to(device)
+            max_new_tokens = safe_whisper_max_new_tokens(
+                requested=self.settings.asr_max_new_tokens,
+                max_target_positions=getattr(model.config, "max_target_positions", None),
+            )
             processor = AutoProcessor.from_pretrained(model_id)
             pipe = pipeline(
                 "automatic-speech-recognition",
                 model=model,
                 tokenizer=processor.tokenizer,
                 feature_extractor=processor.feature_extractor,
-                max_new_tokens=448,
                 chunk_length_s=self.settings.asr_chunk_length_seconds,
                 batch_size=self.settings.asr_batch_size,
                 return_timestamps=True,
@@ -193,7 +197,10 @@ class CaptioningEngine:
             )
             raw = pipe(
                 str(self.settings.audio_path),
-                generate_kwargs={"language": typhoon_language(self.settings.language)},
+                generate_kwargs={
+                    "language": typhoon_language(self.settings.language),
+                    "max_new_tokens": max_new_tokens,
+                },
             )
         except Exception as exc:
             raise CaptioningUnavailable(
@@ -257,6 +264,18 @@ def resolve_asr_model_id(provider: str, model: str) -> str:
 def typhoon_language(language: str) -> str:
     normalized = (language or "th").strip().lower()
     return "thai" if normalized in {"th", "tha", "thai"} else normalized
+
+
+def safe_whisper_max_new_tokens(
+    requested: int,
+    max_target_positions: Optional[int],
+    decoder_prompt_margin: int = 8,
+) -> int:
+    """Keep Whisper generation under the decoder context limit."""
+    requested = max(1, int(requested))
+    if not max_target_positions:
+        return requested
+    return max(1, min(requested, int(max_target_positions) - decoder_prompt_margin))
 
 
 def _segments_from_transformers_asr_result(raw: Any, source: str) -> List[CaptionSegment]:
