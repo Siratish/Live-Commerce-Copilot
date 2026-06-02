@@ -3,7 +3,15 @@ captioning:
   language: th
   cached_transcript_path: data/demo/audio_1_captions.json
   audio_path: data/demo/audio/1.mp3
+  asr_provider: openai_whisper
+  asr_model: large
   whisper_model: large
+  # To use Typhoon Whisper for Thai ASR, set:
+  # asr_provider: typhoon_whisper
+  # asr_model: turbo
+  # Typhoon aliases: large-v3, turbo, medium, monsoon-medium, isan-medium
+  asr_chunk_length_seconds: 30
+  asr_batch_size: 16
   allow_cached_fallback: true
 
 outputs:

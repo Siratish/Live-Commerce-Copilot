@@ -8,9 +8,11 @@ import tempfile
 import unittest
 
 from src.ai.captioning import (
+    available_asr_models,
     captions_to_srt,
     captions_to_webvtt,
     load_cached_transcript,
+    resolve_asr_model_id,
     write_caption_outputs,
 )
 from src.schemas import CaptionSegment, repair_caption_timestamps, validate_caption_segments
@@ -74,9 +76,54 @@ class CaptioningTests(unittest.TestCase):
             summary = json.loads(completed.stdout)
             self.assertEqual(summary["segment_count"], 22)
             self.assertEqual(summary["language"], "th")
+            self.assertEqual(summary["asr_provider"], "openai_whisper")
+            self.assertEqual(summary["asr_model"], "large")
             self.assertTrue(summary["audio_path"].endswith("data\\demo\\audio\\1.mp3") or summary["audio_path"].endswith("data/demo/audio/1.mp3"))
             self.assertTrue((Path(temp_dir) / "captions.json").exists())
             self.assertTrue((Path(temp_dir) / "captions.vtt").exists())
+
+    def test_cli_lists_asr_model_aliases(self) -> None:
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "src.pipeline.run_captioning_demo",
+                "--list-asr-models",
+            ],
+            cwd=REPO_ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        models = json.loads(completed.stdout)
+        self.assertEqual(
+            models["typhoon_whisper"]["turbo"],
+            "typhoon-ai/typhoon-whisper-turbo",
+        )
+        self.assertEqual(
+            models["typhoon_whisper"]["large-v3"],
+            "typhoon-ai/typhoon-whisper-large-v3",
+        )
+
+    def test_asr_model_alias_resolution(self) -> None:
+        self.assertEqual(resolve_asr_model_id("openai_whisper", "large"), "large")
+        self.assertEqual(
+            resolve_asr_model_id("typhoon_whisper", "turbo"),
+            "typhoon-ai/typhoon-whisper-turbo",
+        )
+        self.assertEqual(
+            resolve_asr_model_id("typhoon_whisper", "medium"),
+            "typhoon-ai/monsoon-whisper-medium-gigaspeech2",
+        )
+        self.assertEqual(
+            resolve_asr_model_id("typhoon_whisper", "isan-medium"),
+            "typhoon-ai/typhoon-isan-asr-whisper",
+        )
+        self.assertEqual(
+            resolve_asr_model_id("typhoon_whisper", "some-org/new-thai-asr"),
+            "some-org/new-thai-asr",
+        )
+        self.assertIn("typhoon_whisper", available_asr_models())
 
     def test_realtime_caption_html_embeds_audio_and_segments(self) -> None:
         result = load_cached_transcript(CACHED_TRANSCRIPT)

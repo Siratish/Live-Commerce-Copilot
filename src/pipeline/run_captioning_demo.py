@@ -8,6 +8,7 @@ import json
 from src.ai.captioning import (
     CaptioningEngine,
     CaptioningSettings,
+    available_asr_models,
     caption_metrics,
     write_caption_outputs,
 )
@@ -79,6 +80,8 @@ def run_from_config(
     config_path: Path,
     mode_override: Optional[str] = None,
     output_dir_override: Optional[str] = None,
+    asr_provider_override: Optional[str] = None,
+    asr_model_override: Optional[str] = None,
 ) -> Dict[str, Any]:
     config = load_config(config_path)
     captioning = config.get("captioning", {})
@@ -91,7 +94,17 @@ def run_from_config(
             captioning.get("cached_transcript_path")
         ),
         audio_path=resolve_repo_path(captioning.get("audio_path")),
+        asr_provider=asr_provider_override
+        or str(captioning.get("asr_provider", "openai_whisper")),
+        asr_model=asr_model_override
+        or (
+            None
+            if captioning.get("asr_model") is None
+            else str(captioning.get("asr_model"))
+        ),
         whisper_model=str(captioning.get("whisper_model", "tiny")),
+        asr_chunk_length_seconds=int(captioning.get("asr_chunk_length_seconds", 30)),
+        asr_batch_size=int(captioning.get("asr_batch_size", 16)),
         allow_cached_fallback=bool(captioning.get("allow_cached_fallback", True)),
     )
     output_dir = (
@@ -116,6 +129,8 @@ def run_from_config(
         "language": result.language,
         "segment_count": len(result.segments),
         "mode": settings.mode,
+        "asr_provider": settings.asr_provider,
+        "asr_model": settings.asr_model or settings.whisper_model,
         "audio_path": str(settings.audio_path) if settings.audio_path else None,
         "metrics": metrics,
         "outputs": {key: str(value) for key, value in paths.items()},
@@ -131,9 +146,28 @@ def build_parser() -> ArgumentParser:
     )
     parser.add_argument(
         "--mode",
-        choices=["cached", "auto", "whisper"],
+        choices=["cached", "auto", "whisper", "openai_whisper", "typhoon", "typhoon_whisper"],
         default=None,
         help="Override captioning mode from config.",
+    )
+    parser.add_argument(
+        "--asr-provider",
+        choices=["openai_whisper", "typhoon_whisper"],
+        default=None,
+        help="ASR provider for auto mode.",
+    )
+    parser.add_argument(
+        "--asr-model",
+        default=None,
+        help=(
+            "ASR model alias or full model id. Typhoon aliases include "
+            "large-v3, turbo, medium, and isan-medium."
+        ),
+    )
+    parser.add_argument(
+        "--list-asr-models",
+        action="store_true",
+        help="Print supported ASR model aliases and exit.",
     )
     parser.add_argument(
         "--output-dir",
@@ -145,10 +179,15 @@ def build_parser() -> ArgumentParser:
 
 def main() -> None:
     args = build_parser().parse_args()
+    if args.list_asr_models:
+        print(json.dumps(available_asr_models(), indent=2))
+        return
     summary = run_from_config(
         config_path=Path(args.config),
         mode_override=args.mode,
         output_dir_override=args.output_dir,
+        asr_provider_override=args.asr_provider,
+        asr_model_override=args.asr_model,
     )
     print(json.dumps(summary, indent=2))
 
