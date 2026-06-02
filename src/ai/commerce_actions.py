@@ -7,6 +7,7 @@ import json
 from src.ai.captioning import load_cached_transcript
 from src.ai.decision import (
     CommerceCandidates,
+    CommerceDecision,
     CommerceDecisionProvider,
     CommerceSessionState,
     DeterministicDecisionProvider,
@@ -69,11 +70,15 @@ def generate_commerce_actions(
 
     for index, segment in enumerate(captions.segments):
         next_text = captions.segments[index + 1].text if index + 1 < len(captions.segments) else ""
+        previous_texts = tuple(
+            prior.text for prior in captions.segments[max(0, index - 3) : index]
+        )
         window = TranscriptWindow(
             index=index,
             start=segment.start,
             text=segment.text,
             next_text=next_text,
+            previous_texts=previous_texts,
         )
         bundle_text = window.lookahead_text if has_bundle_cue(segment.text) else segment.text
         candidates = CommerceCandidates(
@@ -88,31 +93,34 @@ def generate_commerce_actions(
             if decision.product_sku not in state.mentioned_skus:
                 state.mentioned_skus.append(decision.product_sku)
 
-            pin_key = (PIN_PRODUCT_CARD, decision.product_sku)
-            suppress_repin = pin_key in emitted and has_bundle_cue(segment.text)
-            if decision.product_sku != state.active_sku and not suppress_repin:
-                state.active_sku = decision.product_sku
-                state.active_bundle = None
-                if pin_key not in emitted:
-                    emitted.add(pin_key)
-                    state.pinned_skus.append(decision.product_sku)
-                    actions.append(
-                        CommerceAction(
-                            timestamp=segment.start,
-                            action_type=PIN_PRODUCT_CARD,
-                            skus=[decision.product_sku],
-                            confidence=round(decision.product_confidence, 3),
-                            evidence_text=segment.text,
-                            display_payload={
-                                "title": "Pin product card",
-                                "product": _product_payload(product),
-                            },
+            if _should_emit(decision, PIN_PRODUCT_CARD):
+                pin_key = (PIN_PRODUCT_CARD, decision.product_sku)
+                suppress_repin = pin_key in emitted and has_bundle_cue(segment.text)
+                if decision.product_sku != state.active_sku and not suppress_repin:
+                    state.active_sku = decision.product_sku
+                    state.active_bundle = None
+                    if pin_key not in emitted:
+                        emitted.add(pin_key)
+                        state.pinned_skus.append(decision.product_sku)
+                        actions.append(
+                            CommerceAction(
+                                timestamp=segment.start,
+                                action_type=PIN_PRODUCT_CARD,
+                                skus=[decision.product_sku],
+                                confidence=round(decision.product_confidence, 3),
+                                evidence_text=segment.text,
+                                display_payload={
+                                    "title": "Pin product card",
+                                    "product": _product_payload(product),
+                                },
+                            )
                         )
-                    )
 
+            if _should_emit(decision, SHOW_PRICE_DROP):
                 price_window = _find_price_window(captions.segments, index, product)
-                if price_window:
-                    timestamp, evidence = price_window
+                has_model_price = _price_decision_matches_catalog(decision, product)
+                if price_window or has_model_price:
+                    timestamp, evidence = price_window or (segment.start, segment.text)
                     price_key = (SHOW_PRICE_DROP, product.sku)
                     if price_key not in emitted:
                         emitted.add(price_key)
@@ -121,7 +129,7 @@ def generate_commerce_actions(
                                 timestamp=timestamp,
                                 action_type=SHOW_PRICE_DROP,
                                 skus=[product.sku],
-                                confidence=0.95,
+                                confidence=_price_confidence(decision),
                                 evidence_text=evidence,
                                 display_payload={
                                     "title": "Live price drop",
@@ -134,7 +142,11 @@ def generate_commerce_actions(
                             )
                         )
 
-        if decision.promo_code and decision.promo_code in promotions_by_code:
+        if (
+            decision.promo_code
+            and decision.promo_code in promotions_by_code
+            and _should_emit(decision, SHOW_PROMO_CODE)
+        ):
             promotion = promotions_by_code[decision.promo_code]
             promo_items = eligible_items_for_promotion(promotion, catalog)
             key = (SHOW_PROMO_CODE, promotion.promo_code)
@@ -162,7 +174,11 @@ def generate_commerce_actions(
                     )
                 )
 
-        if decision.bundle_skus and _valid_bundle(decision.bundle_skus, catalog_by_sku):
+        if (
+            decision.bundle_skus
+            and _valid_bundle(decision.bundle_skus, catalog_by_sku)
+            and _should_emit(decision, SHOW_BUNDLE_RECOMMENDATION)
+        ):
             bundle_skus = decision.bundle_skus[:2]
             key = (SHOW_BUNDLE_RECOMMENDATION, tuple(bundle_skus))
             state.active_bundle = bundle_skus
@@ -187,7 +203,7 @@ def generate_commerce_actions(
                     )
                 )
 
-        if decision.flash_minutes:
+        if decision.flash_minutes and _should_emit(decision, START_FLASH_SALE_COUNTDOWN):
             key = (START_FLASH_SALE_COUNTDOWN, segment.start)
             if key not in emitted:
                 emitted.add(key)
@@ -253,6 +269,23 @@ def _find_price_window(
         else segments[original_index].start
     )
     return timestamp, " ".join(evidence)
+
+
+def _should_emit(decision: CommerceDecision, action_type: str) -> bool:
+    return decision.action_type is None or decision.action_type == action_type
+
+
+def _price_decision_matches_catalog(
+    decision: CommerceDecision,
+    item: ProductCatalogItem,
+) -> bool:
+    return decision.original_price == item.price and decision.discount_price == item.discount_price
+
+
+def _price_confidence(decision: CommerceDecision) -> float:
+    if decision.action_type == SHOW_PRICE_DROP:
+        return round(decision.product_confidence or decision.confidence, 3)
+    return 0.95
 
 
 def _valid_bundle(

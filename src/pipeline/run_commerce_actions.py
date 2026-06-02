@@ -8,10 +8,10 @@ import sys
 
 from src.ai.commerce_actions import generate_commerce_actions, load_caption_result, save_commerce_actions
 from src.ai.decision import (
-    DEFAULT_TYPHOON_S_MODEL_ID,
+    DEFAULT_TYPHOON_MODEL_ID,
     CommerceDecisionProvider,
     DeterministicDecisionProvider,
-    TyphoonSDecisionProvider,
+    Typhoon25DecisionProvider,
 )
 from src.data.catalog import load_product_catalog, load_promotions
 from src.utils.action_timeline import save_action_timeline_html
@@ -94,26 +94,26 @@ def build_parser() -> ArgumentParser:
     )
     parser.add_argument(
         "--decision-provider",
-        choices=["deterministic", "typhoon_s"],
+        choices=["deterministic", "typhoon25", "typhoon_s"],
         default="deterministic",
         help="Decision provider for commerce action extraction.",
     )
     parser.add_argument(
         "--decision-model",
-        default=DEFAULT_TYPHOON_S_MODEL_ID,
-        help="Model id for --decision-provider typhoon_s.",
+        default=DEFAULT_TYPHOON_MODEL_ID,
+        help="Model id for AI decision providers.",
     )
     parser.add_argument(
         "--decision-max-new-tokens",
         type=int,
         default=256,
-        help="Maximum new tokens for Typhoon-S decision JSON generation.",
+        help="Maximum new tokens for AI decision JSON generation.",
     )
     parser.add_argument(
         "--decision-temperature",
         type=float,
         default=0.1,
-        help="Generation temperature for Typhoon-S decision JSON generation.",
+        help="Generation temperature for AI decision JSON generation.",
     )
     return parser
 
@@ -135,9 +135,9 @@ def create_decision_provider(
 ) -> CommerceDecisionProvider:
     if provider_name == "deterministic":
         return DeterministicDecisionProvider()
-    if provider_name == "typhoon_s":
-        return TyphoonSDecisionProvider(
-            model_id=model_id or DEFAULT_TYPHOON_S_MODEL_ID,
+    if provider_name in {"typhoon25", "typhoon_s"}:
+        return Typhoon25DecisionProvider(
+            model_id=model_id or DEFAULT_TYPHOON_MODEL_ID,
             max_new_tokens=max_new_tokens,
             temperature=temperature,
         )
@@ -154,7 +154,7 @@ def main() -> None:
         audio_path=resolve_repo_path(args.audio) if args.audio else None,
         decision_provider=build_decision_provider(args),
         decision_provider_name=args.decision_provider,
-        decision_model=args.decision_model if args.decision_provider == "typhoon_s" else None,
+        decision_model=args.decision_model if args.decision_provider in {"typhoon25", "typhoon_s"} else None,
         decision_max_new_tokens=args.decision_max_new_tokens,
         decision_temperature=args.decision_temperature,
     )

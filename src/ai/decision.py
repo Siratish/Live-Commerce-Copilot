@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import gc
+import json
+import re
 from collections.abc import Mapping as RuntimeMapping
 from collections.abc import Sequence as RuntimeSequence
 from dataclasses import dataclass, field
 from typing import Any, Callable, List, Mapping, Optional, Protocol, Sequence
-import json
-import re
 
 from src.ai.retrieval import ProductCandidate, PromotionCandidate, extract_numbers, normalize_search_text
 from src.schemas import ProductCatalogItem, Promotion
@@ -26,7 +27,8 @@ FLASH_CUES = [
     "\u0e44\u0e25\u0e1f\u0e4c",
 ]
 MINUTE_WORDS = ["\u0e19\u0e32\u0e17\u0e35", "minute"]
-DEFAULT_TYPHOON_S_MODEL_ID = "typhoon-ai/typhoon-s-thaillm-8b-instruct-research-preview"
+DEFAULT_TYPHOON_MODEL_ID = "scb10x/typhoon2.5-qwen3-4b"
+DEFAULT_TYPHOON_S_MODEL_ID = DEFAULT_TYPHOON_MODEL_ID
 
 
 @dataclass(frozen=True)
@@ -35,6 +37,7 @@ class TranscriptWindow:
     start: float
     text: str
     next_text: str = ""
+    previous_texts: Sequence[str] = field(default_factory=tuple)
 
     @property
     def lookahead_text(self) -> str:
@@ -59,6 +62,8 @@ class CommerceSessionState:
 
 @dataclass(frozen=True)
 class CommerceDecision:
+    action_type: Optional[str] = None
+    confidence: float = 0.0
     product_sku: Optional[str] = None
     product_confidence: float = 0.0
     promo_code: Optional[str] = None
@@ -67,6 +72,8 @@ class CommerceDecision:
     bundle_confidence: float = 0.0
     flash_minutes: Optional[int] = None
     flash_confidence: float = 0.0
+    original_price: Optional[int] = None
+    discount_price: Optional[int] = None
 
 
 class CommerceDecisionProvider(Protocol):
@@ -103,7 +110,7 @@ class CallableModelDecisionProvider:
         catalog: Sequence[ProductCatalogItem],
         promotions: Sequence[Promotion],
     ) -> CommerceDecision:
-        payload = _model_payload(window, candidates, state)
+        payload = _model_payload(window, candidates, state, catalog, promotions)
         try:
             raw_decision = self.model_callable(payload)
             return _decision_from_mapping(raw_decision)
@@ -114,12 +121,12 @@ class CallableModelDecisionProvider:
 TextGenerationCallable = Callable[[List[Mapping[str, str]]], str]
 
 
-class TyphoonSDecisionProvider:
-    """Optional Typhoon-S ThaiLLM decider with deterministic fallback."""
+class Typhoon25DecisionProvider:
+    """Optional Typhoon2.5 ThaiLLM decider with deterministic fallback."""
 
     def __init__(
         self,
-        model_id: str = DEFAULT_TYPHOON_S_MODEL_ID,
+        model_id: str = DEFAULT_TYPHOON_MODEL_ID,
         max_new_tokens: int = 256,
         temperature: float = 0.1,
         fallback: Optional[CommerceDecisionProvider] = None,
@@ -144,9 +151,9 @@ class TyphoonSDecisionProvider:
     ) -> CommerceDecision:
         if self._disabled:
             return self.fallback.decide(window, candidates, state, catalog, promotions)
-        payload = _model_payload(window, candidates, state)
+        payload = _model_payload(window, candidates, state, catalog, promotions)
         try:
-            messages = _typhoon_s_messages(payload)
+            messages = _typhoon_messages(payload)
             response_text = (
                 self.text_generator(messages)
                 if self.text_generator
@@ -163,7 +170,7 @@ class TyphoonSDecisionProvider:
             from transformers import AutoModelForCausalLM, AutoTokenizer  # type: ignore
         except ImportError as exc:
             raise RuntimeError(
-                "Typhoon-S decisions require torch and transformers>=4.57.0"
+                "Typhoon2.5 decisions require torch and transformers>=4.57.0"
             ) from exc
 
         if self._tokenizer is None or self._model is None:
@@ -194,6 +201,19 @@ class TyphoonSDecisionProvider:
         )
         response = outputs[0][inputs["input_ids"].shape[-1] :]
         return self._tokenizer.decode(response, skip_special_tokens=True)
+
+    def unload_model(self) -> None:
+        self._model = None
+        self._tokenizer = None
+        gc.collect()
+        try:
+            import torch  # type: ignore
+
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                torch.cuda.ipc_collect()
+        except Exception:
+            pass
 
 
 class DeterministicDecisionProvider:
@@ -266,6 +286,8 @@ def _model_payload(
     window: TranscriptWindow,
     candidates: CommerceCandidates,
     state: CommerceSessionState,
+    catalog: Sequence[ProductCatalogItem],
+    promotions: Sequence[Promotion],
 ) -> Mapping[str, Any]:
     return {
         "window": {
@@ -273,6 +295,7 @@ def _model_payload(
             "start": window.start,
             "text": window.text,
             "next_text": window.next_text,
+            "previous_texts": list(window.previous_texts),
         },
         "state": {
             "active_sku": state.active_sku,
@@ -280,6 +303,35 @@ def _model_payload(
             "active_promo_code": state.active_promo_code,
             "mentioned_skus": state.mentioned_skus,
         },
+        "catalog": [
+            {
+                "sku": item.sku,
+                "product_name": item.product_name,
+                "brand": item.brand,
+                "category": item.category,
+                "price": item.price,
+                "discount_price": item.discount_price,
+                "stock": item.stock,
+                "description": item.description,
+                "tags": item.tags,
+                "compatible_with": item.compatible_with,
+            }
+            for item in catalog
+        ],
+        "promotions": [
+            {
+                "promo_code": promotion.promo_code,
+                "promo_description": promotion.promo_description,
+                "discount_type": promotion.discount_type,
+                "discount_value": promotion.discount_value,
+                "live_only": promotion.live_only,
+                "eligible_categories": promotion.eligible_categories,
+                "eligible_tags": promotion.eligible_tags,
+                "eligible_skus": promotion.eligible_skus,
+                "required_min_stock": promotion.required_min_stock,
+            }
+            for promotion in promotions
+        ],
         "product_candidates": [
             {
                 "sku": candidate.item.sku,
@@ -307,6 +359,11 @@ def _model_payload(
             for candidate in candidates.promotions
         ],
         "expected_output": {
+            "action_type": (
+                "NO_ACTION|PIN_PRODUCT_CARD|SHOW_PRICE_DROP|SHOW_PROMO_CODE|"
+                "SHOW_BUNDLE_RECOMMENDATION|START_FLASH_SALE_COUNTDOWN"
+            ),
+            "confidence": "float",
             "product_sku": "string|null",
             "product_confidence": "float",
             "promo_code": "string|null",
@@ -315,22 +372,35 @@ def _model_payload(
             "bundle_confidence": "float",
             "flash_minutes": "int|null",
             "flash_confidence": "float",
+            "original_price": "int|null",
+            "discount_price": "int|null",
         },
     }
 
 
-def _typhoon_s_messages(payload: Mapping[str, Any]) -> List[Mapping[str, str]]:
+TyphoonSDecisionProvider = Typhoon25DecisionProvider
+
+
+def _typhoon_messages(payload: Mapping[str, Any]) -> List[Mapping[str, str]]:
     system = (
         "You are a live-commerce action decision engine. "
         "Return only compact valid JSON. Do not include markdown. "
-        "Use only candidate SKUs and promo codes from the input. "
-        "Use null when evidence is insufficient."
+        "Choose at most one action for the current caption segment. "
+        "Use only SKUs from catalog and promo codes from promotions. "
+        "Use previous_texts and session state for context. "
+        "Use NO_ACTION and null fields when evidence is insufficient."
     )
     user = (
         "Decide commerce actions from this transcript window. "
-        "Expected JSON keys are product_sku, product_confidence, promo_code, "
-        "promo_confidence, bundle_skus, bundle_confidence, flash_minutes, "
-        "flash_confidence. Confidence values must be between 0 and 1.\n\n"
+        "Return exactly one JSON object with action_type and the fields needed "
+        "for that one action. action_type must be one of NO_ACTION, "
+        "PIN_PRODUCT_CARD, SHOW_PRICE_DROP, SHOW_PROMO_CODE, "
+        "SHOW_BUNDLE_RECOMMENDATION, START_FLASH_SALE_COUNTDOWN. "
+        "For PIN_PRODUCT_CARD use product_sku. For SHOW_PRICE_DROP use "
+        "product_sku, original_price, and discount_price. For SHOW_PROMO_CODE "
+        "use promo_code. For SHOW_BUNDLE_RECOMMENDATION use bundle_skus. "
+        "For START_FLASH_SALE_COUNTDOWN use flash_minutes. Confidence values "
+        "must be between 0 and 1.\n\n"
         f"Input:\n{json.dumps(payload, ensure_ascii=False)}"
     )
     return [
@@ -352,7 +422,7 @@ def extract_json_mapping(text: str) -> Mapping[str, Any]:
             raise
         parsed = json.loads(match.group(0))
     if not isinstance(parsed, RuntimeMapping):
-        raise TypeError("Typhoon-S decision output must be a JSON object")
+        raise TypeError("Typhoon2.5 decision output must be a JSON object")
     return parsed
 
 
@@ -360,23 +430,37 @@ def _decision_from_mapping(raw: Mapping[str, Any]) -> CommerceDecision:
     if not isinstance(raw, Mapping):
         raise TypeError("model decision must be a mapping")
 
+    action_type = _optional_action_type(raw.get("action_type"))
     bundle_skus = raw.get("bundle_skus")
     if bundle_skus is not None:
         if not isinstance(bundle_skus, RuntimeSequence) or isinstance(bundle_skus, (str, bytes)):
             raise TypeError("bundle_skus must be a sequence")
         bundle_skus = [str(value) for value in bundle_skus if value]
 
+    confidence = _optional_float(raw.get("confidence"))
     flash_minutes = raw.get("flash_minutes")
     return CommerceDecision(
+        action_type=action_type,
+        confidence=confidence,
         product_sku=_optional_string(raw.get("product_sku")),
-        product_confidence=_optional_float(raw.get("product_confidence")),
+        product_confidence=_optional_float(raw.get("product_confidence")) or confidence,
         promo_code=_optional_string(raw.get("promo_code")),
-        promo_confidence=_optional_float(raw.get("promo_confidence")),
+        promo_confidence=_optional_float(raw.get("promo_confidence")) or confidence,
         bundle_skus=bundle_skus,
-        bundle_confidence=_optional_float(raw.get("bundle_confidence")),
+        bundle_confidence=_optional_float(raw.get("bundle_confidence")) or confidence,
         flash_minutes=None if flash_minutes is None else int(flash_minutes),
-        flash_confidence=_optional_float(raw.get("flash_confidence")),
+        flash_confidence=_optional_float(raw.get("flash_confidence")) or confidence,
+        original_price=_optional_int(raw.get("original_price")),
+        discount_price=_optional_int(raw.get("discount_price")),
     )
+
+
+def _optional_action_type(value: Any) -> Optional[str]:
+    action_type = _optional_string(value)
+    if action_type is None:
+        return None
+    normalized = action_type.strip().upper()
+    return None if normalized in {"NO_ACTION", "NONE", "NULL"} else normalized
 
 
 def _optional_string(value: Any) -> Optional[str]:
@@ -385,6 +469,10 @@ def _optional_string(value: Any) -> Optional[str]:
 
 def _optional_float(value: Any) -> float:
     return 0.0 if value in (None, "") else float(value)
+
+
+def _optional_int(value: Any) -> Optional[int]:
+    return None if value in (None, "") else int(value)
 
 
 def _first_above(candidates, threshold: float):

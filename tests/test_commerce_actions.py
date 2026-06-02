@@ -25,8 +25,9 @@ from src.ai.decision import (
     CommerceCandidates,
     CommerceDecision,
     CommerceSessionState,
-    DEFAULT_TYPHOON_S_MODEL_ID,
+    DEFAULT_TYPHOON_MODEL_ID,
     TranscriptWindow,
+    Typhoon25DecisionProvider,
     TyphoonSDecisionProvider,
     extract_json_mapping,
 )
@@ -192,6 +193,8 @@ class CommerceActionTests(unittest.TestCase):
     def test_callable_model_provider_accepts_structured_output(self) -> None:
         provider = CallableModelDecisionProvider(
             lambda payload: {
+                "action_type": "SHOW_BUNDLE_RECOMMENDATION",
+                "confidence": 0.86,
                 "product_sku": "SKU002",
                 "product_confidence": 0.91,
                 "promo_code": "LIVE25",
@@ -213,6 +216,141 @@ class CommerceActionTests(unittest.TestCase):
         self.assertEqual(decision.promo_code, "LIVE25")
         self.assertEqual(decision.bundle_skus, ["SKU002", "SKU001"])
         self.assertEqual(decision.flash_minutes, 5)
+        self.assertEqual(decision.action_type, SHOW_BUNDLE_RECOMMENDATION)
+
+    def test_model_payload_includes_catalog_promotions_and_previous_texts(self) -> None:
+        captured = {}
+
+        def capture_payload(payload):
+            captured.update(payload)
+            return {"action_type": "NO_ACTION", "confidence": 0}
+
+        provider = CallableModelDecisionProvider(capture_payload)
+        decision = provider.decide(
+            TranscriptWindow(
+                index=3,
+                start=9.0,
+                text="วันนี้ใช้คู่กัน",
+                next_text="ลดเหลือ 199 บาท",
+                previous_texts=("ตัวแรกเป็นเซรั่ม", "ราคา 399", "ใช้โค้ด LIVE25"),
+            ),
+            CommerceCandidates(products=[], bundle_products=[], promotions=[]),
+            CommerceSessionState(active_sku="SKU001", active_promo_code="LIVE25"),
+            self.catalog,
+            self.promotions,
+        )
+
+        self.assertIsNone(decision.action_type)
+        self.assertEqual(captured["window"]["previous_texts"], ["ตัวแรกเป็นเซรั่ม", "ราคา 399", "ใช้โค้ด LIVE25"])
+        self.assertEqual(len(captured["catalog"]), len(self.catalog))
+        self.assertEqual(len(captured["promotions"]), len(self.promotions))
+        self.assertIn("discount_price", captured["catalog"][0])
+        self.assertNotIn("deeplink", captured["catalog"][0])
+        self.assertIn("eligible_categories", captured["promotions"][0])
+
+    def test_action_windows_include_previous_three_caption_segments(self) -> None:
+        seen_previous = []
+
+        class CaptureWindowProvider:
+            def decide(self, window, candidates, state, catalog, promotions):
+                seen_previous.append(tuple(window.previous_texts))
+                return CommerceDecision()
+
+        captions = CaptionResult(
+            language="th",
+            duration_seconds=4.0,
+            segments=[
+                CaptionSegment(start=0.0, end=1.0, text="หนึ่ง", source="test"),
+                CaptionSegment(start=1.0, end=2.0, text="สอง", source="test"),
+                CaptionSegment(start=2.0, end=3.0, text="สาม", source="test"),
+                CaptionSegment(start=3.0, end=4.0, text="สี่", source="test"),
+            ],
+        )
+        generate_commerce_actions(
+            captions,
+            self.catalog,
+            self.promotions,
+            decision_provider=CaptureWindowProvider(),
+        )
+
+        self.assertEqual(
+            seen_previous,
+            [
+                (),
+                ("หนึ่ง",),
+                ("หนึ่ง", "สอง"),
+                ("หนึ่ง", "สอง", "สาม"),
+            ],
+        )
+
+    def test_model_action_type_limits_output_to_one_action_per_segment(self) -> None:
+        class SingleActionProvider:
+            def decide(self, window, candidates, state, catalog, promotions):
+                return CommerceDecision(
+                    action_type=PIN_PRODUCT_CARD,
+                    confidence=0.9,
+                    product_sku="SKU001",
+                    product_confidence=0.9,
+                    promo_code="LIVE25",
+                    promo_confidence=0.9,
+                    original_price=399,
+                    discount_price=299,
+                )
+
+        captions = CaptionResult(
+            language="th",
+            duration_seconds=2.0,
+            segments=[
+                CaptionSegment(
+                    start=0.0,
+                    end=2.0,
+                    text="Vitamin C Serum ราคา 399 เหลือ 299 ใช้โค้ด LIVE25",
+                    source="test",
+                )
+            ],
+        )
+        actions = generate_commerce_actions(
+            captions,
+            self.catalog,
+            self.promotions,
+            decision_provider=SingleActionProvider(),
+        )
+
+        self.assertEqual([action.action_type for action in actions], [PIN_PRODUCT_CARD])
+
+    def test_model_price_drop_action_can_use_validated_price_details(self) -> None:
+        class PriceActionProvider:
+            def decide(self, window, candidates, state, catalog, promotions):
+                return CommerceDecision(
+                    action_type=SHOW_PRICE_DROP,
+                    confidence=0.88,
+                    product_sku="SKU001",
+                    original_price=399,
+                    discount_price=299,
+                )
+
+        captions = CaptionResult(
+            language="th",
+            duration_seconds=2.0,
+            segments=[
+                CaptionSegment(
+                    start=0.0,
+                    end=2.0,
+                    text="ตัวนี้ลดราคาเฉพาะในไลฟ์",
+                    source="test",
+                )
+            ],
+        )
+        actions = generate_commerce_actions(
+            captions,
+            self.catalog,
+            self.promotions,
+            decision_provider=PriceActionProvider(),
+        )
+
+        self.assertEqual([action.action_type for action in actions], [SHOW_PRICE_DROP])
+        self.assertEqual(actions[0].display_payload["original_price"], 399)
+        self.assertEqual(actions[0].display_payload["discount_price"], 299)
 
     def test_typhoon_s_provider_accepts_json_output(self) -> None:
         def fake_generator(messages):
@@ -231,7 +369,7 @@ class CommerceActionTests(unittest.TestCase):
             ```
             """
 
-        provider = TyphoonSDecisionProvider(text_generator=fake_generator)
+        provider = Typhoon25DecisionProvider(text_generator=fake_generator)
         decision = provider.decide(
             TranscriptWindow(index=0, start=0.0, text="test"),
             CommerceCandidates(products=[], bundle_products=[], promotions=[]),
@@ -245,7 +383,7 @@ class CommerceActionTests(unittest.TestCase):
         self.assertEqual(decision.flash_minutes, 5)
 
     def test_typhoon_s_provider_falls_back_on_invalid_json(self) -> None:
-        provider = TyphoonSDecisionProvider(text_generator=lambda messages: "not json")
+        provider = Typhoon25DecisionProvider(text_generator=lambda messages: "not json")
         window = TranscriptWindow(index=0, start=0.0, text="Green Tea Cleanser")
         candidates = CommerceCandidates(
             products=ProductPromoRetriever.build(self.catalog, self.promotions).retrieve_products(
@@ -268,10 +406,24 @@ class CommerceActionTests(unittest.TestCase):
         parsed = extract_json_mapping('extra {"product_sku": "SKU001"} text')
         self.assertEqual(parsed["product_sku"], "SKU001")
 
+    def test_typhoon_s_provider_unload_is_safe_without_loaded_model(self) -> None:
+        provider = Typhoon25DecisionProvider(text_generator=lambda messages: "{}")
+        provider.unload_model()
+        self.assertIsNone(provider._model)
+        self.assertIsNone(provider._tokenizer)
+
     def test_create_decision_provider_supports_typhoon_s(self) -> None:
         provider = create_decision_provider("typhoon_s")
-        self.assertIsInstance(provider, TyphoonSDecisionProvider)
-        self.assertEqual(provider.model_id, DEFAULT_TYPHOON_S_MODEL_ID)
+        self.assertIsInstance(provider, Typhoon25DecisionProvider)
+        self.assertEqual(provider.model_id, DEFAULT_TYPHOON_MODEL_ID)
+
+    def test_create_decision_provider_supports_typhoon25_alias(self) -> None:
+        provider = create_decision_provider("typhoon25")
+        self.assertIsInstance(provider, Typhoon25DecisionProvider)
+        self.assertEqual(provider.model_id, "scb10x/typhoon2.5-qwen3-4b")
+
+    def test_typhoon_s_provider_name_is_legacy_alias(self) -> None:
+        self.assertIs(TyphoonSDecisionProvider, Typhoon25DecisionProvider)
 
     def test_retrieval_scales_to_10k_skus(self) -> None:
         synthetic_catalog = _synthetic_catalog(10_000)
