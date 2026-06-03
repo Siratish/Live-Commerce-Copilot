@@ -35,6 +35,7 @@ class LiveMicDemoConfig:
     asr_model: str = "base"
     asr_max_new_tokens: int = 256
     install_asr_deps: bool = False
+    show_debug_panel: bool = True
     output_dir: Path = Path("outputs/live_mic")
     catalog_path: Path = Path("data/demo/product_catalog.csv")
     promotions_path: Path = Path("data/demo/promotions.csv")
@@ -166,7 +167,10 @@ def run_colab_live_mic_demo(
 ) -> Dict[str, Any]:
     """Record browser mic chunks in Colab, transcribe them, and emit actions."""
     _install_asr_dependencies(config.install_asr_deps)
-    _install_colab_mic_recorder()
+    if config.show_debug_panel:
+        install_colab_live_mic_debug_panel()
+    else:
+        _install_colab_mic_recorder()
     asr = _build_live_asr(config)
     catalog = load_product_catalog(config.catalog_path)
     promotions = load_promotions(config.promotions_path)
@@ -487,9 +491,10 @@ def install_colab_live_mic_debug_panel() -> None:
             (() => {
               const state = window.liveCommerceMic = window.liveCommerceMic || {};
               state.updateDebug = function(payload) {
-                const root = document.getElementById('live-commerce-mic-debug');
+                const roots = document.querySelectorAll('#live-commerce-mic-debug');
+                const root = roots.length ? roots[roots.length - 1] : null;
                 if (!root) return;
-                const get = id => document.getElementById(id);
+                const get = id => root.querySelector(`#${id}`);
                 const rms = Number(payload.rms || 0);
                 const threshold = Number(payload.threshold || 0);
                 const status = payload.status || 'waiting';
@@ -560,9 +565,8 @@ def _display_live_state(
     actions: Sequence[Any],
     chunk_path: Path,
 ) -> None:
-    from IPython.display import clear_output, display  # type: ignore
+    from IPython.display import display  # type: ignore
 
-    clear_output(wait=True)
     print(
         f"Live mic utterance {chunk_index + 1}/{config.max_chunks} saved to {chunk_path}"
     )
