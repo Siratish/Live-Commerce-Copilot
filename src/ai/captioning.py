@@ -59,6 +59,11 @@ class CaptioningSettings:
     asr_model: Optional[str] = None
     whisper_model: str = "tiny"
     asr_chunk_length_seconds: int = 4
+    asr_dynamic_chunking: bool = True
+    asr_min_chunk_seconds: float = 1.0
+    asr_pause_seconds: float = 0.7
+    asr_silence_threshold: float = 0.012
+    asr_frame_seconds: float = 0.1
     asr_batch_size: int = 16
     asr_max_new_tokens: int = 440
     allow_cached_fallback: bool = True
@@ -211,6 +216,11 @@ class CaptioningEngine:
                 source=f"typhoon_whisper:{model_id}",
                 chunk_length_seconds=self.settings.asr_chunk_length_seconds,
                 max_new_tokens=max_new_tokens,
+                dynamic_chunking=self.settings.asr_dynamic_chunking,
+                min_chunk_seconds=self.settings.asr_min_chunk_seconds,
+                pause_seconds=self.settings.asr_pause_seconds,
+                silence_threshold=self.settings.asr_silence_threshold,
+                frame_seconds=self.settings.asr_frame_seconds,
             )
         except Exception as exc:
             raise CaptioningUnavailable(
@@ -291,9 +301,22 @@ def transcribe_audio_windows(
     source: str,
     chunk_length_seconds: int,
     max_new_tokens: int,
+    dynamic_chunking: bool = True,
+    min_chunk_seconds: float = 1.0,
+    pause_seconds: float = 0.7,
+    silence_threshold: float = 0.012,
+    frame_seconds: float = 0.1,
 ) -> List[CaptionSegment]:
     segments: List[CaptionSegment] = []
-    for window in iter_audio_windows(audio_path, chunk_length_seconds):
+    for window in iter_audio_windows(
+        audio_path,
+        chunk_length_seconds,
+        dynamic_chunking=dynamic_chunking,
+        min_chunk_seconds=min_chunk_seconds,
+        pause_seconds=pause_seconds,
+        silence_threshold=silence_threshold,
+        frame_seconds=frame_seconds,
+    ):
         raw = pipe(
             {"raw": window.samples, "sampling_rate": window.sample_rate},
             generate_kwargs={
@@ -317,6 +340,11 @@ def iter_audio_windows(
     audio_path: Path,
     chunk_length_seconds: int,
     sample_rate: int = 16_000,
+    dynamic_chunking: bool = True,
+    min_chunk_seconds: float = 1.0,
+    pause_seconds: float = 0.7,
+    silence_threshold: float = 0.012,
+    frame_seconds: float = 0.1,
 ) -> Iterator[AudioWindow]:
     try:
         import numpy as np  # type: ignore
@@ -325,9 +353,6 @@ def iter_audio_windows(
             "Typhoon streaming-window transcription requires numpy"
         ) from exc
 
-    chunk_seconds = max(0.1, float(chunk_length_seconds))
-    samples_per_window = max(1, int(sample_rate * chunk_seconds))
-    bytes_per_window = samples_per_window * 2
     command = [
         "ffmpeg",
         "-nostdin",
@@ -349,33 +374,131 @@ def iter_audio_windows(
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
-    if process.stdout is None:
-        raise CaptioningUnavailable("ffmpeg stdout pipe was not created")
+    stdout, stderr_bytes = process.communicate()
+    stderr = stderr_bytes.decode("utf-8", errors="replace") if stderr_bytes else ""
+    return_code = process.wait()
+    if return_code and not stdout:
+        raise CaptioningUnavailable(f"ffmpeg failed to decode audio: {stderr.strip()}")
 
-    start = 0.0
-    produced_windows = 0
-    while True:
-        data = process.stdout.read(bytes_per_window)
-        if not data:
-            break
-        samples = np.frombuffer(data, dtype=np.int16).astype(np.float32) / 32768.0
-        duration = float(len(samples)) / float(sample_rate)
-        if duration <= 0:
-            continue
-        end = start + duration
-        produced_windows += 1
-        yield AudioWindow(
-            start=start,
-            end=end,
+    samples = np.frombuffer(stdout, dtype=np.int16).astype(np.float32) / 32768.0
+    windows = (
+        iter_pause_audio_windows_from_samples(
             samples=samples,
             sample_rate=sample_rate,
+            max_chunk_seconds=chunk_length_seconds,
+            min_chunk_seconds=min_chunk_seconds,
+            pause_seconds=pause_seconds,
+            silence_threshold=silence_threshold,
+            frame_seconds=frame_seconds,
         )
-        start = end
+        if dynamic_chunking
+        else iter_fixed_audio_windows_from_samples(
+            samples=samples,
+            sample_rate=sample_rate,
+            chunk_length_seconds=chunk_length_seconds,
+        )
+    )
+    yield from windows
 
-    stderr = process.stderr.read().decode("utf-8", errors="replace") if process.stderr else ""
-    return_code = process.wait()
-    if return_code and produced_windows == 0:
-        raise CaptioningUnavailable(f"ffmpeg failed to decode audio: {stderr.strip()}")
+
+def iter_fixed_audio_windows_from_samples(
+    samples: Any,
+    sample_rate: int,
+    chunk_length_seconds: float,
+) -> Iterator[AudioWindow]:
+    try:
+        import numpy as np  # type: ignore
+    except ImportError as exc:
+        raise CaptioningUnavailable("audio windowing requires numpy") from exc
+
+    values = np.asarray(samples, dtype=np.float32)
+    chunk_seconds = max(0.1, float(chunk_length_seconds))
+    samples_per_window = max(1, int(sample_rate * chunk_seconds))
+    for start_index in range(0, len(values), samples_per_window):
+        end_index = min(len(values), start_index + samples_per_window)
+        if end_index <= start_index:
+            continue
+        start = float(start_index) / float(sample_rate)
+        end = float(end_index) / float(sample_rate)
+        yield AudioWindow(start=start, end=end, samples=values[start_index:end_index], sample_rate=sample_rate)
+
+
+def iter_pause_audio_windows_from_samples(
+    samples: Any,
+    sample_rate: int,
+    max_chunk_seconds: float,
+    min_chunk_seconds: float = 1.0,
+    pause_seconds: float = 0.7,
+    silence_threshold: float = 0.012,
+    frame_seconds: float = 0.1,
+) -> Iterator[AudioWindow]:
+    """Split audio at speaker pauses using a simple frame-energy heuristic."""
+    try:
+        import numpy as np  # type: ignore
+    except ImportError as exc:
+        raise CaptioningUnavailable("pause-aware audio windowing requires numpy") from exc
+
+    values = np.asarray(samples, dtype=np.float32)
+    if len(values) == 0:
+        return
+
+    frame_samples = max(1, int(sample_rate * max(0.02, float(frame_seconds))))
+    max_samples = max(frame_samples, int(sample_rate * max(0.1, float(max_chunk_seconds))))
+    min_samples = max(frame_samples, int(sample_rate * max(0.0, float(min_chunk_seconds))))
+    pause_samples = max(frame_samples, int(sample_rate * max(0.0, float(pause_seconds))))
+    threshold = max(0.0, float(silence_threshold))
+
+    start_index: Optional[int] = None
+    last_speech_end: Optional[int] = None
+    index = 0
+
+    while index < len(values):
+        frame_end = min(len(values), index + frame_samples)
+        frame = values[index:frame_end]
+        rms = float(np.sqrt(np.mean(np.square(frame)))) if len(frame) else 0.0
+        is_speech = rms >= threshold
+
+        if is_speech:
+            if start_index is None:
+                start_index = index
+            last_speech_end = frame_end
+
+        if start_index is not None and last_speech_end is not None:
+            window_samples = frame_end - start_index
+            speech_samples = last_speech_end - start_index
+            trailing_silence = frame_end - last_speech_end
+            if trailing_silence >= pause_samples and speech_samples >= min_samples:
+                yield _audio_window_from_slice(values, sample_rate, start_index, last_speech_end)
+                start_index = None
+                last_speech_end = None
+            elif window_samples >= max_samples:
+                yield _audio_window_from_slice(values, sample_rate, start_index, frame_end)
+                start_index = None
+                last_speech_end = None
+
+        index = frame_end
+
+    if start_index is not None and last_speech_end is not None:
+        end_index = last_speech_end
+        if end_index <= start_index:
+            end_index = min(len(values), start_index + frame_samples)
+        yield _audio_window_from_slice(values, sample_rate, start_index, end_index)
+
+
+def _audio_window_from_slice(
+    samples: Any,
+    sample_rate: int,
+    start_index: int,
+    end_index: int,
+) -> AudioWindow:
+    start = float(start_index) / float(sample_rate)
+    end = float(end_index) / float(sample_rate)
+    return AudioWindow(
+        start=start,
+        end=end,
+        samples=samples[start_index:end_index],
+        sample_rate=sample_rate,
+    )
 
 
 def _segments_from_transformers_asr_result(

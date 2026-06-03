@@ -1,0 +1,441 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Sequence
+import base64
+import subprocess
+import sys
+
+from src.ai.captioning import (
+    CaptioningUnavailable,
+    _segments_from_transformers_asr_result,
+    normalize_asr_provider,
+    resolve_asr_model_id,
+    safe_whisper_max_new_tokens,
+    save_caption_json,
+    typhoon_language,
+)
+from src.ai.commerce_actions import generate_commerce_actions, save_commerce_actions
+from src.ai.decision import CommerceDecisionProvider
+from src.data.catalog import load_product_catalog, load_promotions
+from src.schemas import CaptionResult, CaptionSegment, repair_caption_timestamps
+
+
+@dataclass(frozen=True)
+class LiveMicDemoConfig:
+    chunk_seconds: float = 4.0
+    min_chunk_seconds: float = 1.0
+    pause_seconds: float = 0.7
+    silence_threshold: float = 0.015
+    max_chunks: int = 6
+    language: str = "th"
+    asr_provider: str = "openai_whisper"
+    asr_model: str = "base"
+    asr_max_new_tokens: int = 256
+    install_asr_deps: bool = False
+    output_dir: Path = Path("outputs/live_mic")
+    catalog_path: Path = Path("data/demo/product_catalog.csv")
+    promotions_path: Path = Path("data/demo/promotions.csv")
+
+
+class _OpenAIWhisperLiveASR:
+    def __init__(self, model_name: str, language: str):
+        if model_name in {"large", "large-v2", "large-v3", "turbo"}:
+            print(f"Loading OpenAI Whisper {model_name}. This may take a while.")
+        try:
+            import whisper  # type: ignore
+        except ImportError as exc:
+            raise CaptioningUnavailable(
+                "openai-whisper is not installed. Set install_asr_deps=True or run pip install -r requirements-asr.txt."
+            ) from exc
+
+        self.model_name = model_name
+        self.language = language
+        self.model = whisper.load_model(model_name)
+
+    def transcribe_chunk(
+        self,
+        chunk_path: Path,
+        offset_seconds: float,
+        fallback_duration_seconds: float,
+    ) -> List[CaptionSegment]:
+        raw = self.model.transcribe(
+            str(chunk_path),
+            language=self.language,
+            task="transcribe",
+            fp16=False,
+            word_timestamps=False,
+        )
+        segments = [
+            CaptionSegment(
+                start=offset_seconds + float(item["start"]),
+                end=offset_seconds + float(item["end"]),
+                text=str(item.get("text", "")).strip(),
+                source=f"live_mic_openai_whisper:{self.model_name}",
+                confidence=None,
+            )
+            for item in raw.get("segments", [])
+            if str(item.get("text", "")).strip()
+        ]
+        if not segments and str(raw.get("text", "")).strip():
+            segments.append(
+                CaptionSegment(
+                    start=offset_seconds,
+                    end=offset_seconds + fallback_duration_seconds,
+                    text=str(raw["text"]).strip(),
+                    source=f"live_mic_openai_whisper:{self.model_name}",
+                    confidence=None,
+                )
+            )
+        return repair_caption_timestamps(segments)
+
+
+class _TyphoonWhisperLiveASR:
+    def __init__(
+        self,
+        model_id: str,
+        language: str,
+        chunk_seconds: float,
+        max_new_tokens: int,
+    ):
+        try:
+            import torch  # type: ignore
+            from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, pipeline  # type: ignore
+        except ImportError as exc:
+            raise CaptioningUnavailable(
+                "Typhoon Whisper requires transformers, torch, and accelerate. Set install_asr_deps=True or run pip install -r requirements-asr.txt."
+            ) from exc
+
+        print(f"Loading Typhoon Whisper model {model_id}. This may take a while.")
+        self.model_id = model_id
+        self.language = language
+        self.chunk_seconds = chunk_seconds
+        device = "cuda:0" if torch.cuda.is_available() else "cpu"
+        torch_dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
+        model = AutoModelForSpeechSeq2Seq.from_pretrained(
+            model_id,
+            torch_dtype=torch_dtype,
+            low_cpu_mem_usage=True,
+            use_safetensors=True,
+        )
+        model.to(device)
+        self.max_new_tokens = safe_whisper_max_new_tokens(
+            requested=max_new_tokens,
+            max_target_positions=getattr(model.config, "max_target_positions", None),
+        )
+        processor = AutoProcessor.from_pretrained(model_id)
+        self.pipe = pipeline(
+            "automatic-speech-recognition",
+            model=model,
+            tokenizer=processor.tokenizer,
+            feature_extractor=processor.feature_extractor,
+            chunk_length_s=max(1, int(chunk_seconds)),
+            batch_size=1,
+            return_timestamps=True,
+            torch_dtype=torch_dtype,
+            device=device,
+        )
+
+    def transcribe_chunk(
+        self,
+        chunk_path: Path,
+        offset_seconds: float,
+        fallback_duration_seconds: float,
+    ) -> List[CaptionSegment]:
+        raw = self.pipe(
+            str(chunk_path),
+            generate_kwargs={
+                "language": typhoon_language(self.language),
+                "max_new_tokens": self.max_new_tokens,
+            },
+        )
+        return _segments_from_transformers_asr_result(
+            raw,
+            source=f"live_mic_typhoon_whisper:{self.model_id}",
+            offset_seconds=offset_seconds,
+            fallback_start=offset_seconds,
+            fallback_end=offset_seconds + fallback_duration_seconds,
+        )
+
+
+def run_colab_live_mic_demo(
+    config: LiveMicDemoConfig = LiveMicDemoConfig(),
+    decision_provider: Optional[CommerceDecisionProvider] = None,
+) -> Dict[str, Any]:
+    """Record browser mic chunks in Colab, transcribe them, and emit actions."""
+    _install_asr_dependencies(config.install_asr_deps)
+    _install_colab_mic_recorder()
+    asr = _build_live_asr(config)
+    catalog = load_product_catalog(config.catalog_path)
+    promotions = load_promotions(config.promotions_path)
+
+    config.output_dir.mkdir(parents=True, exist_ok=True)
+    chunk_dir = config.output_dir / "chunks"
+    chunk_dir.mkdir(parents=True, exist_ok=True)
+
+    live_segments: List[CaptionSegment] = []
+    live_actions = []
+    elapsed_seconds = 0.0
+
+    try:
+        for chunk_index in range(max(1, int(config.max_chunks))):
+            payload = _record_colab_mic_chunk(
+                max_seconds=config.chunk_seconds,
+                min_seconds=config.min_chunk_seconds,
+                pause_seconds=config.pause_seconds,
+                silence_threshold=config.silence_threshold,
+            )
+            duration_seconds = float(payload.get("durationSeconds") or config.chunk_seconds)
+            chunk_path = chunk_dir / f"mic_chunk_{chunk_index:03d}.webm"
+            _write_data_url(payload["dataUrl"], chunk_path)
+
+            new_segments = asr.transcribe_chunk(
+                chunk_path=chunk_path,
+                offset_seconds=elapsed_seconds,
+                fallback_duration_seconds=duration_seconds,
+            )
+            elapsed_seconds += duration_seconds
+            live_segments = repair_caption_timestamps([*live_segments, *new_segments])
+            caption_result = CaptionResult(
+                language=config.language,
+                segments=live_segments,
+                duration_seconds=elapsed_seconds,
+            )
+            live_actions = generate_commerce_actions(
+                caption_result,
+                catalog,
+                promotions,
+                decision_provider=decision_provider,
+            )
+            save_caption_json(caption_result, config.output_dir / "live_mic_captions.json")
+            save_commerce_actions(live_actions, config.output_dir / "live_mic_actions.json")
+            _display_live_state(
+                chunk_index=chunk_index,
+                config=config,
+                segments=live_segments,
+                actions=live_actions,
+                chunk_path=chunk_path,
+            )
+    finally:
+        _stop_colab_mic()
+
+    return {
+        "caption_count": len(live_segments),
+        "action_count": len(live_actions),
+        "captions_json": str(config.output_dir / "live_mic_captions.json"),
+        "actions_json": str(config.output_dir / "live_mic_actions.json"),
+        "chunk_dir": str(chunk_dir),
+    }
+
+
+def _install_asr_dependencies(install: bool) -> None:
+    if install:
+        subprocess.check_call(
+            [sys.executable, "-m", "pip", "install", "-q", "-r", "requirements-asr.txt"]
+        )
+
+
+def _build_live_asr(config: LiveMicDemoConfig):
+    provider = normalize_asr_provider(config.asr_provider)
+    model_id = resolve_asr_model_id(provider, config.asr_model)
+    if provider == "openai_whisper":
+        return _OpenAIWhisperLiveASR(model_id, config.language)
+    if provider == "typhoon_whisper":
+        return _TyphoonWhisperLiveASR(
+            model_id=model_id,
+            language=config.language,
+            chunk_seconds=config.chunk_seconds,
+            max_new_tokens=config.asr_max_new_tokens,
+        )
+    raise CaptioningUnavailable(f"unsupported live mic ASR provider: {config.asr_provider}")
+
+
+def _install_colab_mic_recorder() -> None:
+    try:
+        from IPython.display import Javascript, display  # type: ignore
+        from google.colab import output  # type: ignore  # noqa: F401
+    except ImportError as exc:
+        raise RuntimeError("Live mic recording requires Google Colab browser APIs.") from exc
+
+    display(
+        Javascript(
+            """
+            (() => {
+              window.liveCommerceMic = window.liveCommerceMic || {};
+              window.liveCommerceMic.recordChunk = async function(
+                maxMilliseconds,
+                minMilliseconds,
+                silenceMilliseconds,
+                silenceThreshold
+              ) {
+                const state = window.liveCommerceMic;
+                if (!state.stream) {
+                  state.stream = await navigator.mediaDevices.getUserMedia({audio: true});
+                }
+                if (!state.audioContext) {
+                  state.audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                  state.source = state.audioContext.createMediaStreamSource(state.stream);
+                  state.analyser = state.audioContext.createAnalyser();
+                  state.analyser.fftSize = 1024;
+                  state.source.connect(state.analyser);
+                }
+                if (state.audioContext.state === 'suspended') {
+                  await state.audioContext.resume();
+                }
+                const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+                  ? 'audio/webm;codecs=opus'
+                  : 'audio/webm';
+                const startedAt = performance.now();
+                return await new Promise((resolve, reject) => {
+                  const chunks = [];
+                  const recorder = new MediaRecorder(state.stream, {mimeType});
+                  const waveform = new Uint8Array(state.analyser.fftSize);
+                  let animationId = null;
+                  let stopped = false;
+                  let lastSpeechAt = startedAt;
+                  const stopRecorder = () => {
+                    if (!stopped && recorder.state !== 'inactive') {
+                      stopped = true;
+                      recorder.stop();
+                    }
+                  };
+                  const monitorPause = () => {
+                    const now = performance.now();
+                    state.analyser.getByteTimeDomainData(waveform);
+                    let sumSquares = 0;
+                    for (const value of waveform) {
+                      const centered = (value - 128) / 128;
+                      sumSquares += centered * centered;
+                    }
+                    const rms = Math.sqrt(sumSquares / waveform.length);
+                    if (rms >= silenceThreshold) lastSpeechAt = now;
+                    const elapsed = now - startedAt;
+                    const silenceFor = now - lastSpeechAt;
+                    if (
+                      elapsed >= maxMilliseconds ||
+                      (elapsed >= minMilliseconds && silenceFor >= silenceMilliseconds)
+                    ) {
+                      stopRecorder();
+                      return;
+                    }
+                    animationId = requestAnimationFrame(monitorPause);
+                  };
+                  recorder.ondataavailable = event => {
+                    if (event.data && event.data.size > 0) chunks.push(event.data);
+                  };
+                  recorder.onerror = event => reject(event.error || event);
+                  recorder.onstop = () => {
+                    if (animationId !== null) cancelAnimationFrame(animationId);
+                    const stoppedAt = performance.now();
+                    const blob = new Blob(chunks, {type: mimeType});
+                    const reader = new FileReader();
+                    reader.onloadend = () => resolve({
+                      dataUrl: reader.result,
+                      mimeType,
+                      size: blob.size,
+                      durationSeconds: (stoppedAt - startedAt) / 1000
+                    });
+                    reader.onerror = reject;
+                    reader.readAsDataURL(blob);
+                  };
+                  recorder.start();
+                  animationId = requestAnimationFrame(monitorPause);
+                });
+              };
+              window.liveCommerceMic.stop = function() {
+                const state = window.liveCommerceMic;
+                if (state.stream) {
+                  state.stream.getTracks().forEach(track => track.stop());
+                  state.stream = null;
+                }
+                if (state.audioContext) {
+                  state.audioContext.close();
+                  state.audioContext = null;
+                  state.source = null;
+                  state.analyser = null;
+                }
+                return true;
+              };
+            })();
+            """
+        )
+    )
+
+
+def _record_colab_mic_chunk(
+    max_seconds: float,
+    min_seconds: float,
+    pause_seconds: float,
+    silence_threshold: float,
+) -> Dict[str, Any]:
+    from google.colab import output  # type: ignore
+
+    max_milliseconds = max(500, int(float(max_seconds) * 1000))
+    min_milliseconds = max(200, int(float(min_seconds) * 1000))
+    silence_milliseconds = max(100, int(float(pause_seconds) * 1000))
+    payload = output.eval_js(
+        "window.liveCommerceMic.recordChunk("
+        f"{max_milliseconds}, {min_milliseconds}, "
+        f"{silence_milliseconds}, {float(silence_threshold)})"
+    )
+    if not isinstance(payload, dict) or not payload.get("dataUrl"):
+        raise RuntimeError("browser mic recorder did not return audio data")
+    return payload
+
+
+def _stop_colab_mic() -> None:
+    try:
+        from google.colab import output  # type: ignore
+
+        output.eval_js("window.liveCommerceMic && window.liveCommerceMic.stop()")
+    except Exception:
+        pass
+
+
+def _write_data_url(data_url: str, path: Path) -> None:
+    _, encoded = data_url.split(",", 1)
+    path.write_bytes(base64.b64decode(encoded))
+
+
+def _display_live_state(
+    chunk_index: int,
+    config: LiveMicDemoConfig,
+    segments: Sequence[CaptionSegment],
+    actions: Sequence[Any],
+    chunk_path: Path,
+) -> None:
+    from IPython.display import clear_output, display  # type: ignore
+
+    clear_output(wait=True)
+    print(
+        f"Live mic utterance {chunk_index + 1}/{config.max_chunks} saved to {chunk_path}"
+    )
+    print(f"Captions: {len(segments)} | Actions: {len(actions)}")
+
+    caption_rows = [
+        {
+            "start": round(segment.start, 2),
+            "end": round(segment.end, 2),
+            "text": segment.text,
+            "source": segment.source,
+        }
+        for segment in segments[-8:]
+    ]
+    action_rows = [
+        {
+            "time": round(action.timestamp, 2),
+            "action": action.action_type,
+            "skus": " + ".join(action.skus),
+            "confidence": action.confidence,
+        }
+        for action in actions[-8:]
+    ]
+
+    try:
+        import pandas as pd  # type: ignore
+
+        display(pd.DataFrame(caption_rows))
+        display(pd.DataFrame(action_rows))
+    except Exception:
+        display({"captions": caption_rows, "actions": action_rows})

@@ -13,6 +13,7 @@ from src.ai.captioning import (
     available_asr_models,
     captions_to_srt,
     captions_to_webvtt,
+    iter_pause_audio_windows_from_samples,
     load_cached_transcript,
     resolve_asr_model_id,
     safe_whisper_max_new_tokens,
@@ -83,6 +84,8 @@ class CaptioningTests(unittest.TestCase):
             self.assertEqual(summary["asr_provider"], "openai_whisper")
             self.assertEqual(summary["asr_model"], "large")
             self.assertEqual(summary["asr_chunk_length_seconds"], 4)
+            self.assertTrue(summary["asr_dynamic_chunking"])
+            self.assertEqual(summary["asr_pause_seconds"], 0.7)
             self.assertEqual(summary["asr_max_new_tokens"], 440)
             self.assertTrue(summary["audio_path"].endswith("data\\demo\\audio\\1.mp3") or summary["audio_path"].endswith("data/demo/audio/1.mp3"))
             self.assertTrue((Path(temp_dir) / "captions.json").exists())
@@ -208,6 +211,7 @@ class CaptioningTests(unittest.TestCase):
                 source="typhoon_whisper:test",
                 chunk_length_seconds=4,
                 max_new_tokens=440,
+                dynamic_chunking=True,
             )
 
         self.assertEqual(
@@ -233,11 +237,63 @@ class CaptioningTests(unittest.TestCase):
                 source="typhoon_whisper:test",
                 chunk_length_seconds=4,
                 max_new_tokens=440,
+                dynamic_chunking=True,
             )
 
         self.assertEqual(segments[0].start, 8.5)
         self.assertEqual(segments[0].end, 9.5)
         self.assertEqual(segments[0].text, "inside window")
+
+    def test_pause_audio_windows_split_on_speaker_pause(self) -> None:
+        import numpy as np
+
+        sample_rate = 10
+        samples = np.array(
+            [0.0] * 5
+            + [0.4] * 10
+            + [0.0] * 8
+            + [0.4] * 10
+            + [0.0] * 5,
+            dtype=np.float32,
+        )
+        windows = list(
+            iter_pause_audio_windows_from_samples(
+                samples=samples,
+                sample_rate=sample_rate,
+                max_chunk_seconds=10,
+                min_chunk_seconds=0.5,
+                pause_seconds=0.5,
+                silence_threshold=0.1,
+                frame_seconds=0.1,
+            )
+        )
+
+        self.assertEqual(len(windows), 2)
+        self.assertAlmostEqual(windows[0].start, 0.5)
+        self.assertAlmostEqual(windows[0].end, 1.5)
+        self.assertAlmostEqual(windows[1].start, 2.3)
+        self.assertAlmostEqual(windows[1].end, 3.3)
+
+    def test_pause_audio_windows_respect_max_chunk_without_pause(self) -> None:
+        import numpy as np
+
+        sample_rate = 10
+        samples = np.array([0.4] * 35, dtype=np.float32)
+        windows = list(
+            iter_pause_audio_windows_from_samples(
+                samples=samples,
+                sample_rate=sample_rate,
+                max_chunk_seconds=1.0,
+                min_chunk_seconds=0.2,
+                pause_seconds=0.5,
+                silence_threshold=0.1,
+                frame_seconds=0.1,
+            )
+        )
+
+        self.assertGreaterEqual(len(windows), 3)
+        self.assertAlmostEqual(windows[0].start, 0.0)
+        self.assertAlmostEqual(windows[0].end, 1.0)
 
     def test_realtime_caption_html_embeds_audio_and_segments(self) -> None:
         result = load_cached_transcript(CACHED_TRANSCRIPT)

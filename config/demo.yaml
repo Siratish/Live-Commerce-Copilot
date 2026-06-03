@@ -10,8 +10,14 @@ captioning:
   # asr_provider: typhoon_whisper
   # asr_model: turbo
   # Typhoon aliases: large-v3, turbo, medium, monsoon-medium, isan-medium
-  # Typhoon ASR runs on audio windows, so this controls live-caption cadence.
+  # Typhoon ASR uses pause-aware utterance windows. This value is the max length
+  # before a long continuous utterance is split.
   asr_chunk_length_seconds: 4
+  asr_dynamic_chunking: true
+  asr_min_chunk_seconds: 1.0
+  asr_pause_seconds: 0.7
+  asr_silence_threshold: 0.012
+  asr_frame_seconds: 0.1
   asr_batch_size: 16
   # Whisper decoder context is 448 tokens; keep room for language/task tokens.
   asr_max_new_tokens: 440

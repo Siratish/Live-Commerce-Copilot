@@ -110,6 +110,11 @@ def run_from_config(
             if asr_chunk_length_seconds_override is not None
             else captioning.get("asr_chunk_length_seconds", 4)
         ),
+        asr_dynamic_chunking=bool(captioning.get("asr_dynamic_chunking", True)),
+        asr_min_chunk_seconds=float(captioning.get("asr_min_chunk_seconds", 1.0)),
+        asr_pause_seconds=float(captioning.get("asr_pause_seconds", 0.7)),
+        asr_silence_threshold=float(captioning.get("asr_silence_threshold", 0.012)),
+        asr_frame_seconds=float(captioning.get("asr_frame_seconds", 0.1)),
         asr_batch_size=int(captioning.get("asr_batch_size", 16)),
         asr_max_new_tokens=int(
             asr_max_new_tokens_override
@@ -143,6 +148,10 @@ def run_from_config(
         "asr_provider": settings.asr_provider,
         "asr_model": settings.asr_model or settings.whisper_model,
         "asr_chunk_length_seconds": settings.asr_chunk_length_seconds,
+        "asr_dynamic_chunking": settings.asr_dynamic_chunking,
+        "asr_min_chunk_seconds": settings.asr_min_chunk_seconds,
+        "asr_pause_seconds": settings.asr_pause_seconds,
+        "asr_silence_threshold": settings.asr_silence_threshold,
         "asr_max_new_tokens": settings.asr_max_new_tokens,
         "audio_path": str(settings.audio_path) if settings.audio_path else None,
         "metrics": metrics,
@@ -190,7 +199,7 @@ def build_parser() -> ArgumentParser:
         "--asr-chunk-length-seconds",
         type=int,
         default=None,
-        help="Audio window size for Typhoon streaming ASR.",
+        help="Maximum audio window size for Typhoon streaming ASR.",
     )
     parser.add_argument(
         "--list-asr-models",
