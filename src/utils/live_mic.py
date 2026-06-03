@@ -36,6 +36,9 @@ class LiveMicDemoConfig:
     asr_max_new_tokens: int = 256
     install_asr_deps: bool = False
     show_debug_panel: bool = True
+    continuous_recording: bool = True
+    max_queue_chunks: int = 16
+    poll_interval_seconds: float = 0.25
     output_dir: Path = Path("outputs/live_mic")
     catalog_path: Path = Path("data/demo/product_catalog.csv")
     promotions_path: Path = Path("data/demo/promotions.csv")
@@ -182,76 +185,176 @@ def run_colab_live_mic_demo(
     live_segments: List[CaptionSegment] = []
     live_actions = []
     elapsed_seconds = 0.0
+    processed_chunks = 0
+    buffer_status: Dict[str, Any] = {}
 
     try:
-        for chunk_index in range(max(1, int(config.max_chunks))):
-            payload = _record_colab_mic_chunk(
-                chunk_index=chunk_index + 1,
-                max_seconds=config.chunk_seconds,
-                min_seconds=config.min_chunk_seconds,
-                pause_seconds=config.pause_seconds,
-                silence_threshold=config.silence_threshold,
-            )
-            duration_seconds = float(payload.get("durationSeconds") or config.chunk_seconds)
-            chunk_path = chunk_dir / f"mic_chunk_{chunk_index:03d}.webm"
-            _write_data_url(payload["dataUrl"], chunk_path)
-            _publish_colab_mic_debug(
-                {
-                    "chunkIndex": chunk_index + 1,
-                    "state": "transcribing",
-                    "status": "recorded",
-                    "durationSeconds": duration_seconds,
-                    "size": payload.get("size"),
-                }
-            )
+        if config.continuous_recording:
+            _start_colab_mic_buffer(config)
+            while processed_chunks < max(1, int(config.max_chunks)):
+                payload = _pop_colab_mic_buffered_chunk(config.poll_interval_seconds)
+                if payload is None:
+                    buffer_status = _get_colab_mic_buffer_status()
+                    if buffer_status.get("error"):
+                        raise RuntimeError(
+                            f"browser mic buffered recorder failed: {buffer_status['error']}"
+                        )
+                    if (
+                        buffer_status.get("done")
+                        and int(buffer_status.get("queueDepth") or 0) == 0
+                    ):
+                        break
+                    continue
 
-            new_segments = asr.transcribe_chunk(
-                chunk_path=chunk_path,
-                offset_seconds=elapsed_seconds,
-                fallback_duration_seconds=duration_seconds,
-            )
-            elapsed_seconds += duration_seconds
-            live_segments = repair_caption_timestamps([*live_segments, *new_segments])
-            caption_result = CaptionResult(
-                language=config.language,
-                segments=live_segments,
-                duration_seconds=elapsed_seconds,
-            )
-            live_actions = generate_commerce_actions(
-                caption_result,
-                catalog,
-                promotions,
-                decision_provider=decision_provider,
-            )
-            save_caption_json(caption_result, config.output_dir / "live_mic_captions.json")
-            save_commerce_actions(live_actions, config.output_dir / "live_mic_actions.json")
-            _display_live_state(
-                chunk_index=chunk_index,
-                config=config,
-                segments=live_segments,
-                actions=live_actions,
-                chunk_path=chunk_path,
-            )
-            _publish_colab_mic_debug(
-                {
-                    "chunkIndex": chunk_index + 1,
-                    "state": "completed",
-                    "status": "asr_done",
-                    "durationSeconds": duration_seconds,
-                    "captionCount": len(live_segments),
-                    "actionCount": len(live_actions),
-                }
-            )
+                processed_chunks += 1
+                chunk_number = int(payload.get("chunkIndex") or processed_chunks)
+                (
+                    live_segments,
+                    live_actions,
+                    elapsed_seconds,
+                    chunk_path,
+                ) = _process_live_mic_payload(
+                    payload=payload,
+                    chunk_number=chunk_number,
+                    config=config,
+                    chunk_dir=chunk_dir,
+                    asr=asr,
+                    catalog=catalog,
+                    promotions=promotions,
+                    decision_provider=decision_provider,
+                    live_segments=live_segments,
+                    elapsed_seconds=elapsed_seconds,
+                )
+                _publish_colab_mic_debug(
+                    {
+                        "chunkIndex": chunk_number,
+                        "state": "completed",
+                        "status": "asr_done",
+                        "durationSeconds": payload.get("durationSeconds"),
+                        "captionCount": len(live_segments),
+                        "actionCount": len(live_actions),
+                        "queueDepth": payload.get("queueDepth"),
+                        "droppedChunks": payload.get("droppedChunks"),
+                    }
+                )
+        else:
+            for chunk_index in range(max(1, int(config.max_chunks))):
+                payload = _record_colab_mic_chunk(
+                    chunk_index=chunk_index + 1,
+                    max_seconds=config.chunk_seconds,
+                    min_seconds=config.min_chunk_seconds,
+                    pause_seconds=config.pause_seconds,
+                    silence_threshold=config.silence_threshold,
+                )
+                processed_chunks += 1
+                (
+                    live_segments,
+                    live_actions,
+                    elapsed_seconds,
+                    chunk_path,
+                ) = _process_live_mic_payload(
+                    payload=payload,
+                    chunk_number=chunk_index + 1,
+                    config=config,
+                    chunk_dir=chunk_dir,
+                    asr=asr,
+                    catalog=catalog,
+                    promotions=promotions,
+                    decision_provider=decision_provider,
+                    live_segments=live_segments,
+                    elapsed_seconds=elapsed_seconds,
+                )
+                _publish_colab_mic_debug(
+                    {
+                        "chunkIndex": chunk_index + 1,
+                        "state": "completed",
+                        "status": "asr_done",
+                        "durationSeconds": payload.get("durationSeconds"),
+                        "captionCount": len(live_segments),
+                        "actionCount": len(live_actions),
+                    }
+                )
     finally:
         _stop_colab_mic()
+
+    if config.continuous_recording:
+        buffer_status = _get_colab_mic_buffer_status() or buffer_status
 
     return {
         "caption_count": len(live_segments),
         "action_count": len(live_actions),
+        "processed_chunks": processed_chunks,
+        "dropped_chunks": buffer_status.get("droppedChunks", 0),
         "captions_json": str(config.output_dir / "live_mic_captions.json"),
         "actions_json": str(config.output_dir / "live_mic_actions.json"),
         "chunk_dir": str(chunk_dir),
     }
+
+
+def _process_live_mic_payload(
+    payload: Dict[str, Any],
+    chunk_number: int,
+    config: LiveMicDemoConfig,
+    chunk_dir: Path,
+    asr: Any,
+    catalog: Sequence[Any],
+    promotions: Sequence[Any],
+    decision_provider: Optional[CommerceDecisionProvider],
+    live_segments: Sequence[CaptionSegment],
+    elapsed_seconds: float,
+) -> tuple[List[CaptionSegment], List[Any], float, Path]:
+    duration_seconds = float(payload.get("durationSeconds") or config.chunk_seconds)
+    chunk_path = chunk_dir / f"mic_chunk_{max(0, chunk_number - 1):03d}.webm"
+    _write_data_url(payload["dataUrl"], chunk_path)
+
+    offset_raw = payload.get("sessionOffsetSeconds")
+    offset_seconds = (
+        elapsed_seconds if offset_raw is None else max(0.0, float(offset_raw))
+    )
+    _publish_colab_mic_debug(
+        {
+            "chunkIndex": chunk_number,
+            "state": "transcribing",
+            "status": "dequeued" if config.continuous_recording else "recorded",
+            "durationSeconds": duration_seconds,
+            "size": payload.get("size"),
+            "queueDepth": payload.get("queueDepth"),
+            "droppedChunks": payload.get("droppedChunks"),
+        }
+    )
+
+    new_segments = asr.transcribe_chunk(
+        chunk_path=chunk_path,
+        offset_seconds=offset_seconds,
+        fallback_duration_seconds=duration_seconds,
+    )
+    next_elapsed_seconds = max(elapsed_seconds, offset_seconds + duration_seconds)
+    repaired_segments = repair_caption_timestamps([*live_segments, *new_segments])
+    caption_result = CaptionResult(
+        language=config.language,
+        segments=repaired_segments,
+        duration_seconds=next_elapsed_seconds,
+    )
+    live_actions = generate_commerce_actions(
+        caption_result,
+        catalog,
+        promotions,
+        decision_provider=decision_provider,
+    )
+    save_caption_json(caption_result, config.output_dir / "live_mic_captions.json")
+    save_commerce_actions(live_actions, config.output_dir / "live_mic_actions.json")
+    _display_live_state(
+        chunk_index=chunk_number - 1,
+        config=config,
+        segments=repaired_segments,
+        actions=live_actions,
+        chunk_path=chunk_path,
+        queue_status={
+            "queueDepth": payload.get("queueDepth"),
+            "droppedChunks": payload.get("droppedChunks"),
+        },
+    )
+    return repaired_segments, live_actions, next_elapsed_seconds, chunk_path
 
 
 def _install_asr_dependencies(install: bool) -> None:
@@ -323,6 +426,7 @@ def _install_colab_mic_recorder() -> None:
                 return await new Promise((resolve, reject) => {
                   const chunks = [];
                   const recorder = new MediaRecorder(state.stream, {mimeType});
+                  state.activeRecorder = recorder;
                   const waveform = new Uint8Array(state.analyser.fftSize);
                   let animationId = null;
                   let stopped = false;
@@ -380,6 +484,9 @@ def _install_colab_mic_recorder() -> None:
                     if (animationId !== null) cancelAnimationFrame(animationId);
                     const stoppedAt = performance.now();
                     const blob = new Blob(chunks, {type: mimeType});
+                    if (state.activeRecorder === recorder) {
+                      state.activeRecorder = null;
+                    }
                     state.publishDebug({
                       chunkIndex: chunkIndex || null,
                       state: 'recorded',
@@ -392,8 +499,15 @@ def _install_colab_mic_recorder() -> None:
                     reader.onloadend = () => resolve({
                       dataUrl: reader.result,
                       mimeType,
+                      chunkIndex: chunkIndex || null,
+                      stopReason: stopReason || 'stopped',
                       size: blob.size,
-                      durationSeconds: (stoppedAt - startedAt) / 1000
+                      durationSeconds: (stoppedAt - startedAt) / 1000,
+                      startedAtMs: startedAt,
+                      stoppedAtMs: stoppedAt,
+                      sessionOffsetSeconds: state.bufferSessionStartedAt
+                        ? (startedAt - state.bufferSessionStartedAt) / 1000
+                        : null
                     });
                     reader.onerror = reject;
                     reader.readAsDataURL(blob);
@@ -402,8 +516,148 @@ def _install_colab_mic_recorder() -> None:
                   animationId = requestAnimationFrame(monitorPause);
                 });
               };
+              window.liveCommerceMic.startBufferedRecording = function(
+                maxMilliseconds,
+                minMilliseconds,
+                silenceMilliseconds,
+                silenceThreshold,
+                maxChunks,
+                maxQueueChunks
+              ) {
+                const state = window.liveCommerceMic;
+                if (state.bufferLoopActive) {
+                  return {
+                    started: false,
+                    reason: 'already_active',
+                    queueDepth: (state.bufferQueue || []).length
+                  };
+                }
+                state.stopRequested = false;
+                state.bufferQueue = [];
+                state.bufferWaiters = [];
+                state.bufferDone = false;
+                state.bufferError = null;
+                state.droppedChunks = 0;
+                state.maxQueueChunks = Math.max(1, Number(maxQueueChunks || 16));
+                state.bufferSessionStartedAt = performance.now();
+                state.bufferLoopActive = true;
+                const wakeWaiter = (payload) => {
+                  const waiter = (state.bufferWaiters || []).shift();
+                  if (waiter) {
+                    waiter(payload);
+                    return true;
+                  }
+                  return false;
+                };
+                state.enqueueBufferedChunk = function(payload) {
+                  const enriched = Object.assign({}, payload || {}, {
+                    queueDepth: (state.bufferQueue || []).length,
+                    droppedChunks: state.droppedChunks || 0
+                  });
+                  if (wakeWaiter(enriched)) return;
+                  if (state.bufferQueue.length >= state.maxQueueChunks) {
+                    state.bufferQueue.shift();
+                    state.droppedChunks += 1;
+                  }
+                  enriched.queueDepth = state.bufferQueue.length + 1;
+                  enriched.droppedChunks = state.droppedChunks;
+                  state.bufferQueue.push(enriched);
+                };
+                state.publishDebug({
+                  chunkIndex: 1,
+                  state: 'buffering',
+                  status: 'started',
+                  queueDepth: 0,
+                  droppedChunks: 0,
+                  maxSeconds: maxMilliseconds / 1000,
+                  minSeconds: minMilliseconds / 1000,
+                  pauseSeconds: silenceMilliseconds / 1000
+                });
+                (async () => {
+                  try {
+                    for (let index = 1; index <= Number(maxChunks || 1); index += 1) {
+                      if (state.stopRequested) break;
+                      const payload = await state.recordChunk(
+                        maxMilliseconds,
+                        minMilliseconds,
+                        silenceMilliseconds,
+                        silenceThreshold,
+                        index
+                      );
+                      if (state.stopRequested) break;
+                      state.enqueueBufferedChunk(payload);
+                      state.publishDebug({
+                        chunkIndex: index,
+                        state: 'queued',
+                        status: payload.stopReason || 'recorded',
+                        durationSeconds: payload.durationSeconds,
+                        size: payload.size,
+                        queueDepth: state.bufferQueue.length,
+                        droppedChunks: state.droppedChunks
+                      });
+                    }
+                  } catch (error) {
+                    state.bufferError = error && (error.message || String(error));
+                    state.publishDebug({
+                      state: 'error',
+                      status: state.bufferError,
+                      queueDepth: state.bufferQueue.length,
+                      droppedChunks: state.droppedChunks
+                    });
+                  } finally {
+                    state.bufferLoopActive = false;
+                    state.bufferDone = true;
+                    while ((state.bufferWaiters || []).length) {
+                      state.bufferWaiters.shift()(null);
+                    }
+                    state.publishDebug({
+                      state: 'recording_done',
+                      status: state.bufferError || 'done',
+                      queueDepth: state.bufferQueue.length,
+                      droppedChunks: state.droppedChunks
+                    });
+                  }
+                })();
+                return {started: true, queueDepth: 0, droppedChunks: 0};
+              };
+              window.liveCommerceMic.popNextBufferedChunk = function(waitMilliseconds) {
+                const state = window.liveCommerceMic;
+                if (state.bufferQueue && state.bufferQueue.length) {
+                  const payload = state.bufferQueue.shift();
+                  payload.queueDepth = state.bufferQueue.length;
+                  payload.droppedChunks = state.droppedChunks || 0;
+                  return payload;
+                }
+                if (state.bufferDone || !state.bufferLoopActive) return null;
+                return new Promise(resolve => {
+                  const done = (payload) => {
+                    clearTimeout(timer);
+                    resolve(payload);
+                  };
+                  const timer = setTimeout(() => {
+                    state.bufferWaiters = (state.bufferWaiters || []).filter(waiter => waiter !== done);
+                    resolve(null);
+                  }, Math.max(50, Number(waitMilliseconds || 250)));
+                  state.bufferWaiters = state.bufferWaiters || [];
+                  state.bufferWaiters.push(done);
+                });
+              };
+              window.liveCommerceMic.getBufferedStatus = function() {
+                const state = window.liveCommerceMic;
+                return {
+                  active: Boolean(state.bufferLoopActive),
+                  done: Boolean(state.bufferDone),
+                  queueDepth: (state.bufferQueue || []).length,
+                  droppedChunks: state.droppedChunks || 0,
+                  error: state.bufferError || null
+                };
+              };
               window.liveCommerceMic.stop = function() {
                 const state = window.liveCommerceMic;
+                state.stopRequested = true;
+                if (state.activeRecorder && state.activeRecorder.state !== 'inactive') {
+                  state.activeRecorder.stop();
+                }
                 if (state.stream) {
                   state.stream.getTracks().forEach(track => track.stop());
                   state.stream = null;
@@ -443,6 +697,51 @@ def _record_colab_mic_chunk(
     if not isinstance(payload, dict) or not payload.get("dataUrl"):
         raise RuntimeError("browser mic recorder did not return audio data")
     return payload
+
+
+def _start_colab_mic_buffer(config: LiveMicDemoConfig) -> Dict[str, Any]:
+    from google.colab import output  # type: ignore
+
+    max_milliseconds = max(500, int(float(config.chunk_seconds) * 1000))
+    min_milliseconds = max(200, int(float(config.min_chunk_seconds) * 1000))
+    silence_milliseconds = max(100, int(float(config.pause_seconds) * 1000))
+    result = output.eval_js(
+        "window.liveCommerceMic.startBufferedRecording("
+        f"{max_milliseconds}, {min_milliseconds}, "
+        f"{silence_milliseconds}, {float(config.silence_threshold)}, "
+        f"{max(1, int(config.max_chunks))}, {max(1, int(config.max_queue_chunks))})"
+    )
+    if not isinstance(result, dict) or not result.get("started"):
+        reason = result.get("reason") if isinstance(result, dict) else result
+        raise RuntimeError(f"browser mic buffered recorder did not start: {reason}")
+    return result
+
+
+def _pop_colab_mic_buffered_chunk(wait_seconds: float) -> Optional[Dict[str, Any]]:
+    from google.colab import output  # type: ignore
+
+    wait_milliseconds = max(50, int(float(wait_seconds) * 1000))
+    payload = output.eval_js(
+        f"window.liveCommerceMic.popNextBufferedChunk({wait_milliseconds})"
+    )
+    if payload is None:
+        return None
+    if not isinstance(payload, dict) or not payload.get("dataUrl"):
+        raise RuntimeError("browser mic buffered recorder returned invalid audio data")
+    return payload
+
+
+def _get_colab_mic_buffer_status() -> Dict[str, Any]:
+    try:
+        from google.colab import output  # type: ignore
+
+        status = output.eval_js(
+            "window.liveCommerceMic && window.liveCommerceMic.getBufferedStatus "
+            "? window.liveCommerceMic.getBufferedStatus() : null"
+        )
+        return status if isinstance(status, dict) else {}
+    except Exception:
+        return {}
 
 
 def install_colab_live_mic_debug_panel() -> None:
@@ -515,6 +814,8 @@ def install_colab_live_mic_debug_panel() -> None:
                 if (payload.maxSeconds) detailParts.push(`max ${Number(payload.maxSeconds).toFixed(1)}s`);
                 if (payload.minSeconds) detailParts.push(`min ${Number(payload.minSeconds).toFixed(1)}s`);
                 if (payload.pauseSeconds) detailParts.push(`pause ${Number(payload.pauseSeconds).toFixed(1)}s`);
+                if (payload.queueDepth !== undefined) detailParts.push(`queue ${payload.queueDepth}`);
+                if (payload.droppedChunks !== undefined) detailParts.push(`dropped ${payload.droppedChunks}`);
                 if (payload.size) detailParts.push(`${payload.size} bytes`);
                 if (payload.captionCount !== undefined) detailParts.push(`${payload.captionCount} captions`);
                 if (payload.actionCount !== undefined) detailParts.push(`${payload.actionCount} actions`);
@@ -564,6 +865,7 @@ def _display_live_state(
     segments: Sequence[CaptionSegment],
     actions: Sequence[Any],
     chunk_path: Path,
+    queue_status: Optional[Dict[str, Any]] = None,
 ) -> None:
     from IPython.display import display  # type: ignore
 
@@ -571,6 +873,12 @@ def _display_live_state(
         f"Live mic utterance {chunk_index + 1}/{config.max_chunks} saved to {chunk_path}"
     )
     print(f"Captions: {len(segments)} | Actions: {len(actions)}")
+    if queue_status and queue_status.get("queueDepth") is not None:
+        print(
+            "Buffered chunks waiting: "
+            f"{queue_status.get('queueDepth')} | Dropped chunks: "
+            f"{queue_status.get('droppedChunks') or 0}"
+        )
 
     caption_rows = [
         {
