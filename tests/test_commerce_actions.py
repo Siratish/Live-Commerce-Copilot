@@ -159,7 +159,74 @@ class CommerceActionTests(unittest.TestCase):
                 (SHOW_PROMO_CODE, ["SKU001", "SKU002", "SKU007"], 29.34),
                 (PIN_PRODUCT_CARD, ["SKU002"], 49.04),
                 (SHOW_BUNDLE_RECOMMENDATION, ["SKU002", "SKU001"], 62.94),
-                (START_FLASH_SALE_COUNTDOWN, ["SKU002", "SKU001"], 70.44),
+                (START_FLASH_SALE_COUNTDOWN, ["SKU002", "SKU001"], 72.74),
+            ],
+        )
+
+    def test_split_bundle_cue_across_realtime_chunks_generates_bundle(self) -> None:
+        captions = CaptionResult(
+            language="th",
+            duration_seconds=77.3,
+            segments=[
+                CaptionSegment(
+                    start=8.3,
+                    end=13.7,
+                    text="ตัวแรกคือวิตามินซีซีรัมจาก Demo Beauty ปกติราคา 399 บาท",
+                    source="test",
+                ),
+                CaptionSegment(
+                    start=49.2,
+                    end=53.44,
+                    text="ตอนนี้เป็น Green Tea Cleanser จาก Demo Beauty ค่ะ",
+                    source="test",
+                ),
+                CaptionSegment(
+                    start=53.8,
+                    end=56.46,
+                    text="ปกติราคา 259 บาท",
+                    source="test",
+                ),
+                CaptionSegment(
+                    start=61.26,
+                    end=62.8,
+                    text="เหมาะสำหรับใช้ทุกวันค่ะ",
+                    source="test",
+                ),
+                CaptionSegment(
+                    start=63.1,
+                    end=65.74,
+                    text="ถ้าใช้คู่กันแนะนำให้ใช้ Queen Tea Crancer ก่อน",
+                    source="test",
+                ),
+                CaptionSegment(
+                    start=65.74,
+                    end=68.22,
+                    text="แล้วตามด้วยวิตามิน C Serum หลัง ๆ หน้านะคะ",
+                    source="test",
+                ),
+                CaptionSegment(
+                    start=70.5,
+                    end=72.58,
+                    text="ตอนนี้โปรไลท์ 2 หาเหลือเวลาอิ",
+                    source="test",
+                ),
+                CaptionSegment(
+                    start=72.9,
+                    end=77.3,
+                    text="5 นาที เท่านั้นนะคะ ใครสนใจสามารถกดซื้อผ่านลิงค์ใน True ID Like ได้เลยค่ะ",
+                    source="test",
+                ),
+            ],
+        )
+        actions = generate_commerce_actions(captions, self.catalog, self.promotions)
+        sequence = [(action.action_type, action.skus, round(action.timestamp, 2)) for action in actions]
+        self.assertEqual(
+            sequence,
+            [
+                (PIN_PRODUCT_CARD, ["SKU001"], 8.3),
+                (PIN_PRODUCT_CARD, ["SKU002"], 49.2),
+                (SHOW_BUNDLE_RECOMMENDATION, ["SKU002", "SKU001"], 63.1),
+                (START_FLASH_SALE_COUNTDOWN, ["SKU002", "SKU001"], 72.9),
             ],
         )
 
@@ -305,13 +372,14 @@ class CommerceActionTests(unittest.TestCase):
 
         self.assertIsNone(decision.action_type)
         self.assertEqual(captured["window"]["previous_texts"], ["ตัวแรกเป็นเซรั่ม", "ราคา 399", "ใช้โค้ด LIVE25"])
+        self.assertIn("history_text", captured["window"])
         self.assertEqual(len(captured["catalog"]), len(self.catalog))
         self.assertEqual(len(captured["promotions"]), len(self.promotions))
         self.assertIn("discount_price", captured["catalog"][0])
         self.assertNotIn("deeplink", captured["catalog"][0])
         self.assertIn("eligible_categories", captured["promotions"][0])
 
-    def test_action_windows_include_previous_three_caption_segments(self) -> None:
+    def test_action_windows_include_unresolved_history_segments(self) -> None:
         seen_previous = []
 
         class CaptureWindowProvider:
@@ -345,6 +413,65 @@ class CommerceActionTests(unittest.TestCase):
                 ("หนึ่ง", "สอง", "สาม"),
             ],
         )
+
+    def test_action_history_resets_after_emitted_action(self) -> None:
+        seen_previous = []
+
+        class ResetAfterActionProvider:
+            def decide(self, window, candidates, state, catalog, promotions):
+                seen_previous.append(tuple(window.previous_texts))
+                if window.index == 0:
+                    return CommerceDecision(
+                        action_type=PIN_PRODUCT_CARD,
+                        product_sku="SKU001",
+                        product_confidence=1.0,
+                    )
+                return CommerceDecision()
+
+        captions = CaptionResult(
+            language="th",
+            duration_seconds=2.0,
+            segments=[
+                CaptionSegment(start=0.0, end=1.0, text="Vitamin C Serum", source="test"),
+                CaptionSegment(start=1.0, end=2.0, text="next unresolved segment", source="test"),
+            ],
+        )
+        actions = generate_commerce_actions(
+            captions,
+            self.catalog,
+            self.promotions,
+            decision_provider=ResetAfterActionProvider(),
+        )
+
+        self.assertEqual([action.action_type for action in actions], [PIN_PRODUCT_CARD])
+        self.assertEqual(seen_previous, [(), ()])
+
+    def test_action_history_trims_oldest_segments_when_too_long(self) -> None:
+        seen_history = []
+
+        class CaptureHistoryProvider:
+            def decide(self, window, candidates, state, catalog, promotions):
+                seen_history.append(window.history_text)
+                return CommerceDecision()
+
+        captions = CaptionResult(
+            language="th",
+            duration_seconds=3.0,
+            segments=[
+                CaptionSegment(start=0.0, end=1.0, text="aaaa", source="test"),
+                CaptionSegment(start=1.0, end=2.0, text="bbbb", source="test"),
+                CaptionSegment(start=2.0, end=3.0, text="cccc", source="test"),
+            ],
+        )
+        generate_commerce_actions(
+            captions,
+            self.catalog,
+            self.promotions,
+            decision_provider=CaptureHistoryProvider(),
+            max_decision_history_chars=9,
+        )
+
+        self.assertEqual(seen_history, ["aaaa", "aaaa bbbb", "bbbb cccc"])
 
     def test_model_action_type_limits_output_to_one_action_per_segment(self) -> None:
         class SingleActionProvider:

@@ -14,14 +14,16 @@ from src.ai.decision import (
     TranscriptWindow,
     has_bundle_cue,
 )
-from src.ai.retrieval import ProductPromoRetriever
-from src.schemas import CaptionResult, CommerceAction, ProductCatalogItem, Promotion
+from src.ai.retrieval import ProductCandidate, ProductPromoRetriever
+from src.schemas import CaptionResult, CaptionSegment, CommerceAction, ProductCatalogItem, Promotion
 
 
 PIN_PRODUCT_CARD = "PIN_PRODUCT_CARD"
 SHOW_PROMO_CODE = "SHOW_PROMO_CODE"
 SHOW_BUNDLE_RECOMMENDATION = "SHOW_BUNDLE_RECOMMENDATION"
 START_FLASH_SALE_COUNTDOWN = "START_FLASH_SALE_COUNTDOWN"
+DEFAULT_DECISION_HISTORY_CHARS = 900
+CURRENT_PRODUCT_SUPPORT_THRESHOLD = 0.48
 
 
 def load_caption_result(path: Path) -> CaptionResult:
@@ -58,6 +60,7 @@ def generate_commerce_actions(
     promotions: Sequence[Promotion],
     decision_provider: Optional[CommerceDecisionProvider] = None,
     retriever: Optional[ProductPromoRetriever] = None,
+    max_decision_history_chars: int = DEFAULT_DECISION_HISTORY_CHARS,
 ) -> List[CommerceAction]:
     retriever = retriever or ProductPromoRetriever.build(catalog, promotions)
     decision_provider = decision_provider or DeterministicDecisionProvider()
@@ -66,41 +69,63 @@ def generate_commerce_actions(
     actions: List[CommerceAction] = []
     emitted = set()
     state = CommerceSessionState()
+    history_segments = []
 
     for index, segment in enumerate(captions.segments):
-        next_text = captions.segments[index + 1].text if index + 1 < len(captions.segments) else ""
-        previous_texts = tuple(
-            prior.text for prior in captions.segments[max(0, index - 3) : index]
+        history_segments.append(segment)
+        history_segments = _trim_history_segments(
+            history_segments,
+            max_decision_history_chars,
         )
+        previous_texts = tuple(prior.text for prior in history_segments[:-1])
         window = TranscriptWindow(
             index=index,
             start=segment.start,
             text=segment.text,
-            next_text=next_text,
+            next_text="",
             previous_texts=previous_texts,
         )
-        bundle_text = window.lookahead_text if has_bundle_cue(segment.text) else segment.text
-        promotion_text = _promotion_context_text(segment.text, state.active_sku, catalog_by_sku)
+        decision_text = window.history_text
+        promotion_text = _promotion_context_text(decision_text, state.active_sku, catalog_by_sku)
+        current_product_candidates = retriever.retrieve_products(segment.text, top_k=5)
+        history_product_candidates = retriever.retrieve_products(decision_text, top_k=5)
         candidates = CommerceCandidates(
-            products=retriever.retrieve_products(segment.text, top_k=5),
-            bundle_products=retriever.retrieve_products(bundle_text, top_k=5),
+            products=_merge_product_candidates(
+                current_product_candidates,
+                history_product_candidates,
+                top_k=5,
+            ),
+            bundle_products=retriever.retrieve_products(decision_text, top_k=5),
             promotions=retriever.retrieve_promotions(promotion_text, top_k=5),
         )
         decision = decision_provider.decide(window, candidates, state, catalog, promotions)
+        action_count_before = len(actions)
 
         if decision.product_sku and decision.product_sku in catalog_by_sku:
             product = catalog_by_sku[decision.product_sku]
-            if decision.product_sku not in state.mentioned_skus:
-                state.mentioned_skus.append(decision.product_sku)
-
             if _should_emit(decision, PIN_PRODUCT_CARD):
                 pin_key = (PIN_PRODUCT_CARD, decision.product_sku)
                 suppress_repin = pin_key in emitted and has_bundle_cue(segment.text)
-                if decision.product_sku != state.active_sku and not suppress_repin:
+                current_support = _candidate_score(
+                    current_product_candidates,
+                    decision.product_sku,
+                )
+                supported_new_pin = (
+                    not state.active_sku
+                    or decision.product_sku == state.active_sku
+                    or current_support >= CURRENT_PRODUCT_SUPPORT_THRESHOLD
+                )
+                if (
+                    decision.product_sku != state.active_sku
+                    and not suppress_repin
+                    and supported_new_pin
+                ):
                     state.active_sku = decision.product_sku
                     state.active_bundle = None
                     if pin_key not in emitted:
                         emitted.add(pin_key)
+                        if decision.product_sku not in state.mentioned_skus:
+                            state.mentioned_skus.append(decision.product_sku)
                         state.pinned_skus.append(decision.product_sku)
                         actions.append(
                             CommerceAction(
@@ -108,7 +133,7 @@ def generate_commerce_actions(
                                 action_type=PIN_PRODUCT_CARD,
                                 skus=[decision.product_sku],
                                 confidence=round(decision.product_confidence, 3),
-                                evidence_text=segment.text,
+                                evidence_text=decision_text,
                                 display_payload={
                                     "title": "Pin product card",
                                     "product": _product_payload(product),
@@ -133,7 +158,7 @@ def generate_commerce_actions(
                         action_type=SHOW_PROMO_CODE,
                         skus=[item.sku for item in promo_items],
                         confidence=round(decision.promo_confidence, 3),
-                        evidence_text=segment.text,
+                        evidence_text=decision_text,
                         display_payload={
                             "title": "Promo code detected",
                             "promo_code": promotion.promo_code,
@@ -154,13 +179,13 @@ def generate_commerce_actions(
             and _should_emit(decision, SHOW_BUNDLE_RECOMMENDATION)
         ):
             bundle_skus = decision.bundle_skus[:2]
-            key = (SHOW_BUNDLE_RECOMMENDATION, tuple(bundle_skus))
-            state.active_bundle = bundle_skus
-            for sku in bundle_skus:
-                if sku not in state.mentioned_skus:
-                    state.mentioned_skus.append(sku)
+            key = (SHOW_BUNDLE_RECOMMENDATION, frozenset(bundle_skus))
             if key not in emitted:
                 emitted.add(key)
+                state.active_bundle = bundle_skus
+                for sku in bundle_skus:
+                    if sku not in state.mentioned_skus:
+                        state.mentioned_skus.append(sku)
                 first, second = catalog_by_sku[bundle_skus[0]], catalog_by_sku[bundle_skus[1]]
                 actions.append(
                     CommerceAction(
@@ -168,7 +193,7 @@ def generate_commerce_actions(
                         action_type=SHOW_BUNDLE_RECOMMENDATION,
                         skus=bundle_skus,
                         confidence=round(decision.bundle_confidence, 3),
-                        evidence_text=segment.text,
+                        evidence_text=decision_text,
                         display_payload={
                             "title": "Recommended bundle",
                             "products": [_product_payload(first), _product_payload(second)],
@@ -188,7 +213,7 @@ def generate_commerce_actions(
                         action_type=START_FLASH_SALE_COUNTDOWN,
                         skus=flash_skus,
                         confidence=round(decision.flash_confidence, 3),
-                        evidence_text=segment.text,
+                        evidence_text=decision_text,
                         display_payload={
                             "title": "Flash sale countdown",
                             "duration_minutes": decision.flash_minutes,
@@ -198,7 +223,58 @@ def generate_commerce_actions(
                     )
                 )
 
+        if len(actions) > action_count_before:
+            history_segments = []
+
     return sorted(actions, key=lambda action: (action.timestamp, action.action_type))
+
+
+def _trim_history_segments(
+    segments: Sequence[CaptionSegment],
+    max_chars: int,
+) -> List[CaptionSegment]:
+    trimmed = list(segments)
+    limit = max(0, int(max_chars))
+    while len(trimmed) > 1 and len(_join_history_text(trimmed)) > limit:
+        trimmed.pop(0)
+    return trimmed
+
+
+def _join_history_text(segments: Sequence[CaptionSegment]) -> str:
+    return " ".join(segment.text for segment in segments if segment.text).strip()
+
+
+def _merge_product_candidates(
+    primary: Sequence[ProductCandidate],
+    secondary: Sequence[ProductCandidate],
+    top_k: int,
+) -> List[ProductCandidate]:
+    by_sku: Dict[str, ProductCandidate] = {}
+    order: List[str] = []
+    for candidate in [*primary, *secondary]:
+        sku = candidate.item.sku
+        if sku not in by_sku:
+            order.append(sku)
+            by_sku[sku] = candidate
+            continue
+        existing = by_sku[sku]
+        if candidate.score > existing.score:
+            by_sku[sku] = candidate
+
+    return sorted(
+        by_sku.values(),
+        key=lambda candidate: (-candidate.score, order.index(candidate.item.sku)),
+    )[:top_k]
+
+
+def _candidate_score(
+    candidates: Sequence[ProductCandidate],
+    sku: str,
+) -> float:
+    for candidate in candidates:
+        if candidate.item.sku == sku:
+            return candidate.score
+    return 0.0
 
 
 def _product_payload(item: ProductCatalogItem) -> Dict[str, Any]:

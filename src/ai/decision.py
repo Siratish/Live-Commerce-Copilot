@@ -45,6 +45,14 @@ class TranscriptWindow:
     def lookahead_text(self) -> str:
         return f"{self.text} {self.next_text}".strip()
 
+    @property
+    def context_text(self) -> str:
+        return " ".join([*self.previous_texts, self.text, self.next_text]).strip()
+
+    @property
+    def history_text(self) -> str:
+        return " ".join([*self.previous_texts, self.text]).strip()
+
 
 @dataclass(frozen=True)
 class CommerceCandidates:
@@ -221,7 +229,7 @@ class DeterministicDecisionProvider:
         self,
         product_threshold: float = 0.48,
         promo_threshold: float = 0.68,
-        bundle_threshold: float = 0.48,
+        bundle_threshold: float = 0.35,
     ):
         self.product_threshold = product_threshold
         self.promo_threshold = promo_threshold
@@ -240,16 +248,17 @@ class DeterministicDecisionProvider:
 
         bundle_skus = None
         bundle_confidence = 0.0
-        if has_bundle_cue(window.text):
+        bundle_context = window.history_text
+        if has_bundle_cue(bundle_context):
             bundle_skus, bundle_confidence = _decide_bundle(
                 candidates.bundle_products,
                 state,
                 catalog,
                 self.bundle_threshold,
-                window.lookahead_text,
+                bundle_context,
             )
 
-        flash_minutes = extract_flash_minutes(window.lookahead_text if has_flash_cue(window.text) else window.text)
+        flash_minutes = extract_flash_minutes(window.history_text)
 
         return CommerceDecision(
             product_sku=product.item.sku if product else None,
@@ -297,6 +306,8 @@ def _model_payload(
             "text": window.text,
             "next_text": window.next_text,
             "previous_texts": list(window.previous_texts),
+            "history_text": window.history_text,
+            "context_text": window.context_text,
         },
         "state": {
             "active_sku": state.active_sku,
@@ -386,7 +397,7 @@ def _typhoon_messages(payload: Mapping[str, Any]) -> List[Mapping[str, str]]:
         "Return only compact valid JSON. Do not include markdown. "
         "Choose at most one action for the current caption segment. "
         "Use only SKUs from catalog and promo codes from promotions. "
-        "Use previous_texts and session state for context. "
+        "Use history_text, current text, and session state for context. "
         "Use NO_ACTION and null fields when evidence is insufficient."
     )
     user = (
@@ -489,15 +500,36 @@ def _decide_bundle(
         if candidate.item.sku not in skus:
             skus.append(candidate.item.sku)
             confidence = max(confidence, candidate.score)
-        if len(skus) == 2:
-            return _order_skus_by_mention(skus, candidates, catalog, text), max(0.89, confidence)
+        if len(skus) >= 2:
+            pair = _first_compatible_pair(skus, catalog)
+            if pair:
+                return _order_skus_by_mention(pair, candidates, catalog, text), max(0.89, confidence)
 
-    if len(skus) == 1:
-        partner = _latest_compatible_history_sku(skus[0], state.mentioned_skus, catalog)
+    for sku in skus:
+        partner = _latest_compatible_history_sku(sku, state.mentioned_skus, catalog)
         if partner:
-            return _order_skus_by_mention([skus[0], partner], candidates, catalog, text), max(0.84, confidence)
+            pair = [sku, partner]
+            return _order_skus_by_mention(pair, candidates, catalog, text), max(0.84, confidence)
 
     return None, 0.0
+
+
+def _first_compatible_pair(
+    skus: Sequence[str],
+    catalog: Sequence[ProductCatalogItem],
+) -> Optional[List[str]]:
+    items = {item.sku: item for item in catalog}
+    for index, first_sku in enumerate(skus):
+        first = items.get(first_sku)
+        if not first:
+            continue
+        for second_sku in skus[index + 1 :]:
+            second = items.get(second_sku)
+            if not second:
+                continue
+            if second.sku in first.compatible_with or first.sku in second.compatible_with:
+                return [first_sku, second_sku]
+    return None
 
 
 def _order_skus_by_mention(
@@ -514,6 +546,9 @@ def _order_skus_by_mention(
     for sku in skus:
         if sku not in positions and sku in catalog_by_sku:
             positions[sku] = _product_mention_position(catalog_by_sku[sku], text)
+    known_positions = [positions.get(sku) for sku in skus if positions.get(sku) is not None]
+    if len(known_positions) < 2:
+        return list(skus)
     return sorted(
         list(skus),
         key=lambda sku: (
