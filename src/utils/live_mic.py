@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 import base64
+import json
 import subprocess
 import sys
 
@@ -181,6 +182,7 @@ def run_colab_live_mic_demo(
     try:
         for chunk_index in range(max(1, int(config.max_chunks))):
             payload = _record_colab_mic_chunk(
+                chunk_index=chunk_index + 1,
                 max_seconds=config.chunk_seconds,
                 min_seconds=config.min_chunk_seconds,
                 pause_seconds=config.pause_seconds,
@@ -189,6 +191,15 @@ def run_colab_live_mic_demo(
             duration_seconds = float(payload.get("durationSeconds") or config.chunk_seconds)
             chunk_path = chunk_dir / f"mic_chunk_{chunk_index:03d}.webm"
             _write_data_url(payload["dataUrl"], chunk_path)
+            _publish_colab_mic_debug(
+                {
+                    "chunkIndex": chunk_index + 1,
+                    "state": "transcribing",
+                    "status": "recorded",
+                    "durationSeconds": duration_seconds,
+                    "size": payload.get("size"),
+                }
+            )
 
             new_segments = asr.transcribe_chunk(
                 chunk_path=chunk_path,
@@ -216,6 +227,16 @@ def run_colab_live_mic_demo(
                 segments=live_segments,
                 actions=live_actions,
                 chunk_path=chunk_path,
+            )
+            _publish_colab_mic_debug(
+                {
+                    "chunkIndex": chunk_index + 1,
+                    "state": "completed",
+                    "status": "asr_done",
+                    "durationSeconds": duration_seconds,
+                    "captionCount": len(live_segments),
+                    "actionCount": len(live_actions),
+                }
             )
     finally:
         _stop_colab_mic()
@@ -263,11 +284,19 @@ def _install_colab_mic_recorder() -> None:
             """
             (() => {
               window.liveCommerceMic = window.liveCommerceMic || {};
+              window.liveCommerceMic.publishDebug = window.liveCommerceMic.publishDebug || function(payload) {
+                const state = window.liveCommerceMic;
+                state.latestDebug = Object.assign({}, state.latestDebug || {}, payload || {});
+                if (typeof state.updateDebug === 'function') {
+                  state.updateDebug(state.latestDebug);
+                }
+              };
               window.liveCommerceMic.recordChunk = async function(
                 maxMilliseconds,
                 minMilliseconds,
                 silenceMilliseconds,
-                silenceThreshold
+                silenceThreshold,
+                chunkIndex
               ) {
                 const state = window.liveCommerceMic;
                 if (!state.stream) {
@@ -294,9 +323,11 @@ def _install_colab_mic_recorder() -> None:
                   let animationId = null;
                   let stopped = false;
                   let lastSpeechAt = startedAt;
-                  const stopRecorder = () => {
+                  let stopReason = null;
+                  const stopRecorder = (reason) => {
                     if (!stopped && recorder.state !== 'inactive') {
                       stopped = true;
+                      stopReason = reason;
                       recorder.stop();
                     }
                   };
@@ -309,14 +340,30 @@ def _install_colab_mic_recorder() -> None:
                       sumSquares += centered * centered;
                     }
                     const rms = Math.sqrt(sumSquares / waveform.length);
-                    if (rms >= silenceThreshold) lastSpeechAt = now;
+                    const isSilence = rms < silenceThreshold;
+                    if (!isSilence) lastSpeechAt = now;
                     const elapsed = now - startedAt;
                     const silenceFor = now - lastSpeechAt;
+                    state.publishDebug({
+                      chunkIndex: chunkIndex || null,
+                      state: 'recording',
+                      status: isSilence ? 'silence' : 'speech',
+                      rms: rms,
+                      threshold: silenceThreshold,
+                      elapsedSeconds: elapsed / 1000,
+                      silenceSeconds: silenceFor / 1000,
+                      maxSeconds: maxMilliseconds / 1000,
+                      minSeconds: minMilliseconds / 1000,
+                      pauseSeconds: silenceMilliseconds / 1000
+                    });
                     if (
-                      elapsed >= maxMilliseconds ||
-                      (elapsed >= minMilliseconds && silenceFor >= silenceMilliseconds)
+                      elapsed >= maxMilliseconds
                     ) {
-                      stopRecorder();
+                      stopRecorder('max_duration');
+                      return;
+                    }
+                    if (elapsed >= minMilliseconds && silenceFor >= silenceMilliseconds) {
+                      stopRecorder('pause_detected');
                       return;
                     }
                     animationId = requestAnimationFrame(monitorPause);
@@ -329,6 +376,14 @@ def _install_colab_mic_recorder() -> None:
                     if (animationId !== null) cancelAnimationFrame(animationId);
                     const stoppedAt = performance.now();
                     const blob = new Blob(chunks, {type: mimeType});
+                    state.publishDebug({
+                      chunkIndex: chunkIndex || null,
+                      state: 'recorded',
+                      status: stopReason || 'stopped',
+                      elapsedSeconds: (stoppedAt - startedAt) / 1000,
+                      durationSeconds: (stoppedAt - startedAt) / 1000,
+                      size: blob.size
+                    });
                     const reader = new FileReader();
                     reader.onloadend = () => resolve({
                       dataUrl: reader.result,
@@ -364,6 +419,7 @@ def _install_colab_mic_recorder() -> None:
 
 
 def _record_colab_mic_chunk(
+    chunk_index: int,
     max_seconds: float,
     min_seconds: float,
     pause_seconds: float,
@@ -377,11 +433,110 @@ def _record_colab_mic_chunk(
     payload = output.eval_js(
         "window.liveCommerceMic.recordChunk("
         f"{max_milliseconds}, {min_milliseconds}, "
-        f"{silence_milliseconds}, {float(silence_threshold)})"
+        f"{silence_milliseconds}, {float(silence_threshold)}, "
+        f"{int(chunk_index)})"
     )
     if not isinstance(payload, dict) or not payload.get("dataUrl"):
         raise RuntimeError("browser mic recorder did not return audio data")
     return payload
+
+
+def install_colab_live_mic_debug_panel() -> None:
+    """Display a Colab mic debug panel that updates while live chunks record."""
+    _install_colab_mic_recorder()
+    try:
+        from IPython.display import HTML, Javascript, display  # type: ignore
+        from google.colab import output  # type: ignore  # noqa: F401
+    except ImportError as exc:
+        raise RuntimeError("Live mic debug panel requires Google Colab browser APIs.") from exc
+
+    display(
+        HTML(
+            """
+            <div id="live-commerce-mic-debug" style="
+              border:1px solid #d0d5dd;
+              border-radius:8px;
+              padding:12px;
+              font-family:Arial,sans-serif;
+              max-width:720px;
+              background:#fff;
+            ">
+              <div style="font-weight:700;font-size:16px;margin-bottom:8px;">Live Mic Debug</div>
+              <div style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin-bottom:10px;">
+                <div><div style="color:#667085;font-size:12px;">Chunk</div><div id="mic-debug-chunk" style="font-weight:700;">-</div></div>
+                <div><div style="color:#667085;font-size:12px;">Detector</div><div id="mic-debug-status" style="font-weight:700;">waiting</div></div>
+                <div><div style="color:#667085;font-size:12px;">State</div><div id="mic-debug-state" style="font-weight:700;">idle</div></div>
+              </div>
+              <div style="display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin-bottom:10px;">
+                <div><div style="color:#667085;font-size:12px;">Volume RMS</div><div id="mic-debug-rms">0.0000</div></div>
+                <div><div style="color:#667085;font-size:12px;">Threshold</div><div id="mic-debug-threshold">-</div></div>
+                <div><div style="color:#667085;font-size:12px;">Elapsed</div><div id="mic-debug-elapsed">0.00s</div></div>
+                <div><div style="color:#667085;font-size:12px;">Silence For</div><div id="mic-debug-silence">0.00s</div></div>
+              </div>
+              <div style="height:12px;background:#f2f4f7;border-radius:999px;overflow:hidden;">
+                <div id="mic-debug-meter" style="height:100%;width:0%;background:#12b76a;"></div>
+              </div>
+              <div id="mic-debug-detail" style="margin-top:8px;color:#667085;font-size:12px;">Run the live mic demo cell to start receiving values.</div>
+            </div>
+            """
+        )
+    )
+    display(
+        Javascript(
+            """
+            (() => {
+              const state = window.liveCommerceMic = window.liveCommerceMic || {};
+              state.updateDebug = function(payload) {
+                const root = document.getElementById('live-commerce-mic-debug');
+                if (!root) return;
+                const get = id => document.getElementById(id);
+                const rms = Number(payload.rms || 0);
+                const threshold = Number(payload.threshold || 0);
+                const status = payload.status || 'waiting';
+                const isSpeech = status === 'speech';
+                const isSilence = status === 'silence';
+                const meterPct = Math.max(0, Math.min(100, (rms / Math.max(threshold || 0.001, 0.001)) * 70));
+                get('mic-debug-chunk').textContent = payload.chunkIndex ? String(payload.chunkIndex) : '-';
+                get('mic-debug-status').textContent = status;
+                get('mic-debug-status').style.color = isSpeech ? '#027a48' : (isSilence ? '#b42318' : '#344054');
+                get('mic-debug-state').textContent = payload.state || 'idle';
+                get('mic-debug-rms').textContent = rms.toFixed(4);
+                get('mic-debug-threshold').textContent = threshold ? threshold.toFixed(4) : '-';
+                get('mic-debug-elapsed').textContent = `${Number(payload.elapsedSeconds || payload.durationSeconds || 0).toFixed(2)}s`;
+                get('mic-debug-silence').textContent = `${Number(payload.silenceSeconds || 0).toFixed(2)}s`;
+                get('mic-debug-meter').style.width = `${meterPct}%`;
+                get('mic-debug-meter').style.background = isSpeech ? '#12b76a' : '#f04438';
+                const detailParts = [];
+                if (payload.maxSeconds) detailParts.push(`max ${Number(payload.maxSeconds).toFixed(1)}s`);
+                if (payload.minSeconds) detailParts.push(`min ${Number(payload.minSeconds).toFixed(1)}s`);
+                if (payload.pauseSeconds) detailParts.push(`pause ${Number(payload.pauseSeconds).toFixed(1)}s`);
+                if (payload.size) detailParts.push(`${payload.size} bytes`);
+                if (payload.captionCount !== undefined) detailParts.push(`${payload.captionCount} captions`);
+                if (payload.actionCount !== undefined) detailParts.push(`${payload.actionCount} actions`);
+                get('mic-debug-detail').textContent = detailParts.join(' | ') || 'Waiting for mic input.';
+              };
+              state.publishDebug = state.publishDebug || function(payload) {
+                state.latestDebug = Object.assign({}, state.latestDebug || {}, payload || {});
+                if (typeof state.updateDebug === 'function') state.updateDebug(state.latestDebug);
+              };
+              if (state.latestDebug) state.updateDebug(state.latestDebug);
+            })();
+            """
+        )
+    )
+
+
+def _publish_colab_mic_debug(payload: Dict[str, Any]) -> None:
+    try:
+        from google.colab import output  # type: ignore
+
+        encoded = json.dumps(payload)
+        output.eval_js(
+            "window.liveCommerceMic && window.liveCommerceMic.publishDebug && "
+            f"window.liveCommerceMic.publishDebug({encoded})"
+        )
+    except Exception:
+        pass
 
 
 def _stop_colab_mic() -> None:
