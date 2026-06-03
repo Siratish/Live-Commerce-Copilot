@@ -21,6 +21,11 @@ from src.ai.captioning import (
     write_caption_outputs,
 )
 from src.schemas import CaptionSegment, repair_caption_timestamps, validate_caption_segments
+from src.utils.realtime_audio_file import (
+    RealtimeAudioFileDemoConfig,
+    run_realtime_audio_file_demo,
+    write_audio_window_wav,
+)
 from src.utils.realtime_caption import build_realtime_caption_html
 
 
@@ -314,6 +319,93 @@ class CaptioningTests(unittest.TestCase):
         validate_caption_segments(repaired)
         self.assertEqual(repaired[1].start, 2.0)
         self.assertGreater(repaired[2].end, repaired[2].start)
+
+    def test_realtime_audio_file_gate_releases_chunks_before_asr(self) -> None:
+        import numpy as np
+
+        class FakePlaybackGate:
+            def __init__(self) -> None:
+                self.current_time = 0.0
+                self.waits = []
+                self.published = []
+
+            def install(self) -> None:
+                pass
+
+            def wait_for_start(self):
+                return {"currentTime": self.current_time}
+
+            def wait_until(self, target_seconds):
+                self.waits.append(float(target_seconds))
+                self.current_time = float(target_seconds)
+                return {"currentTime": self.current_time}
+
+            def publish(self, payload):
+                self.published.append(dict(payload))
+
+        class FakeAsr:
+            def __init__(self, gate: FakePlaybackGate) -> None:
+                self.gate = gate
+                self.calls = []
+
+            def transcribe_chunk(self, chunk_path, offset_seconds, fallback_duration_seconds):
+                self.calls.append((offset_seconds, fallback_duration_seconds, Path(chunk_path).exists()))
+                self.assert_playback_released(offset_seconds, fallback_duration_seconds)
+                return [
+                    CaptionSegment(
+                        start=offset_seconds,
+                        end=offset_seconds + fallback_duration_seconds,
+                        text=f"chunk {len(self.calls)}",
+                        source="fake_stream_asr",
+                    )
+                ]
+
+            def assert_playback_released(self, offset_seconds, duration_seconds) -> None:
+                self_gate_time = self.gate.current_time
+                if self_gate_time < offset_seconds + duration_seconds:
+                    raise AssertionError("ASR started before playback passed the chunk")
+
+        gate = FakePlaybackGate()
+        asr = FakeAsr(gate)
+        windows = [
+            AudioWindow(0.0, 2.0, np.zeros(32, dtype=np.float32), 16_000),
+            AudioWindow(2.0, 4.0, np.zeros(32, dtype=np.float32), 16_000),
+        ]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            summary = run_realtime_audio_file_demo(
+                RealtimeAudioFileDemoConfig(
+                    audio_path=REPO_ROOT / "data" / "demo" / "audio" / "1.mp3",
+                    output_dir=Path(temp_dir),
+                    catalog_path=REPO_ROOT / "data" / "demo" / "product_catalog.csv",
+                    promotions_path=REPO_ROOT / "data" / "demo" / "promotions.csv",
+                ),
+                playback_gate=gate,
+                asr=asr,
+                windows=windows,
+            )
+
+            self.assertEqual(gate.waits, [2.0, 4.0])
+            self.assertEqual(
+                [(offset, duration) for offset, duration, _ in asr.calls],
+                [(0.0, 2.0), (2.0, 2.0)],
+            )
+            self.assertTrue(all(exists for _, _, exists in asr.calls))
+            self.assertEqual(summary["processed_chunks"], 2)
+            self.assertTrue((Path(temp_dir) / "realtime_file_captions.json").exists())
+
+    def test_write_audio_window_wav_outputs_mono_pcm(self) -> None:
+        import numpy as np
+        import wave
+
+        window = AudioWindow(0.0, 0.1, np.array([0.0, 0.5, -0.5], dtype=np.float32), 16_000)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "chunk.wav"
+            write_audio_window_wav(window, path)
+            with wave.open(str(path), "rb") as handle:
+                self.assertEqual(handle.getnchannels(), 1)
+                self.assertEqual(handle.getsampwidth(), 2)
+                self.assertEqual(handle.getframerate(), 16_000)
+                self.assertEqual(handle.getnframes(), 3)
 
 
 if __name__ == "__main__":
