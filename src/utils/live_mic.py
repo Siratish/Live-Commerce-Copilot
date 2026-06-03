@@ -29,7 +29,7 @@ class LiveMicDemoConfig:
     min_chunk_seconds: float = 1.0
     pause_seconds: float = 0.7
     silence_threshold: float = 0.015
-    max_chunks: int = 6
+    max_chunks: Optional[int] = 6
     language: str = "th"
     asr_provider: str = "openai_whisper"
     asr_model: str = "base"
@@ -191,7 +191,7 @@ def run_colab_live_mic_demo(
     try:
         if config.continuous_recording:
             _start_colab_mic_buffer(config)
-            while processed_chunks < max(1, int(config.max_chunks)):
+            while not _chunk_limit_reached(processed_chunks, config.max_chunks):
                 payload = _pop_colab_mic_buffered_chunk(config.poll_interval_seconds)
                 if payload is None:
                     buffer_status = _get_colab_mic_buffer_status()
@@ -238,6 +238,11 @@ def run_colab_live_mic_demo(
                     }
                 )
         else:
+            if config.max_chunks is None:
+                raise RuntimeError(
+                    "non-continuous live mic mode requires max_chunks; "
+                    "use continuous_recording=True for an open-ended mic session"
+                )
             for chunk_index in range(max(1, int(config.max_chunks))):
                 payload = _record_colab_mic_chunk(
                     chunk_index=chunk_index + 1,
@@ -362,6 +367,12 @@ def _install_asr_dependencies(install: bool) -> None:
         subprocess.check_call(
             [sys.executable, "-m", "pip", "install", "-q", "-r", "requirements-asr.txt"]
         )
+
+
+def _chunk_limit_reached(processed_chunks: int, max_chunks: Optional[int]) -> bool:
+    if max_chunks is None:
+        return False
+    return processed_chunks >= max(1, int(max_chunks))
 
 
 def _build_live_asr(config: LiveMicDemoConfig):
@@ -575,7 +586,9 @@ def _install_colab_mic_recorder() -> None:
                 });
                 (async () => {
                   try {
-                    for (let index = 1; index <= Number(maxChunks || 1); index += 1) {
+                    const numericMaxChunks = Number(maxChunks || 0);
+                    const unlimited = !numericMaxChunks || numericMaxChunks < 1;
+                    for (let index = 1; unlimited || index <= numericMaxChunks; index += 1) {
                       if (state.stopRequested) break;
                       const payload = await state.recordChunk(
                         maxMilliseconds,
@@ -705,11 +718,14 @@ def _start_colab_mic_buffer(config: LiveMicDemoConfig) -> Dict[str, Any]:
     max_milliseconds = max(500, int(float(config.chunk_seconds) * 1000))
     min_milliseconds = max(200, int(float(config.min_chunk_seconds) * 1000))
     silence_milliseconds = max(100, int(float(config.pause_seconds) * 1000))
+    max_chunks_js = (
+        "null" if config.max_chunks is None else str(max(1, int(config.max_chunks)))
+    )
     result = output.eval_js(
         "window.liveCommerceMic.startBufferedRecording("
         f"{max_milliseconds}, {min_milliseconds}, "
         f"{silence_milliseconds}, {float(config.silence_threshold)}, "
-        f"{max(1, int(config.max_chunks))}, {max(1, int(config.max_queue_chunks))})"
+        f"{max_chunks_js}, {max(1, int(config.max_queue_chunks))})"
     )
     if not isinstance(result, dict) or not result.get("started"):
         reason = result.get("reason") if isinstance(result, dict) else result
@@ -779,6 +795,16 @@ def install_colab_live_mic_debug_panel() -> None:
               <div style="height:12px;background:#f2f4f7;border-radius:999px;overflow:hidden;">
                 <div id="mic-debug-meter" style="height:100%;width:0%;background:#12b76a;"></div>
               </div>
+              <button id="mic-debug-stop" style="
+                margin-top:10px;
+                border:0;
+                border-radius:6px;
+                padding:8px 12px;
+                background:#b42318;
+                color:#fff;
+                font-weight:700;
+                cursor:pointer;
+              ">Stop live mic</button>
               <div id="mic-debug-detail" style="margin-top:8px;color:#667085;font-size:12px;">Run the live mic demo cell to start receiving values.</div>
             </div>
             """
@@ -799,6 +825,15 @@ def install_colab_live_mic_debug_panel() -> None:
                 const status = payload.status || 'waiting';
                 const isSpeech = status === 'speech';
                 const isSilence = status === 'silence';
+                const stopButton = get('mic-debug-stop');
+                if (stopButton && !stopButton.dataset.bound) {
+                  stopButton.dataset.bound = '1';
+                  stopButton.onclick = () => {
+                    if (typeof state.stop === 'function') state.stop();
+                    stopButton.textContent = 'Stopping...';
+                    stopButton.disabled = true;
+                  };
+                }
                 const meterPct = Math.max(0, Math.min(100, (rms / Math.max(threshold || 0.001, 0.001)) * 70));
                 get('mic-debug-chunk').textContent = payload.chunkIndex ? String(payload.chunkIndex) : '-';
                 get('mic-debug-status').textContent = status;
@@ -869,8 +904,9 @@ def _display_live_state(
 ) -> None:
     from IPython.display import display  # type: ignore
 
+    max_chunks_label = "open" if config.max_chunks is None else str(config.max_chunks)
     print(
-        f"Live mic utterance {chunk_index + 1}/{config.max_chunks} saved to {chunk_path}"
+        f"Live mic utterance {chunk_index + 1}/{max_chunks_label} saved to {chunk_path}"
     )
     print(f"Captions: {len(segments)} | Actions: {len(actions)}")
     if queue_status and queue_status.get("queueDepth") is not None:

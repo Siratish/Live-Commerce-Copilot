@@ -7,8 +7,6 @@ import csv
 import html
 import json
 import mimetypes
-import subprocess
-import sys
 
 from src.ai.captioning import (
     CaptionResult,
@@ -16,11 +14,9 @@ from src.ai.captioning import (
     CaptioningSettings,
     caption_metrics,
     load_cached_transcript,
-    save_caption_json,
     write_caption_outputs,
 )
 from src.ai.commerce_actions import generate_commerce_actions, save_commerce_actions
-from src.ai.decision import DEFAULT_TYPHOON_MODEL_ID
 from src.data.catalog import load_product_catalog, load_promotions
 from src.schemas import CommerceAction, ProductCatalogItem, Promotion
 from src.utils.action_timeline import save_action_timeline_html
@@ -41,6 +37,14 @@ SAMPLE_AUDIO = {
 SAMPLE_CACHED_TRANSCRIPTS = {
     "Audio 1 - Beauty": REPO_ROOT / "data" / "demo" / "audio_1_captions.json",
 }
+FULL_DEMO_ASR_PROVIDER = "openai_whisper"
+FULL_DEMO_ASR_MODEL = "turbo"
+FULL_DEMO_LANGUAGE = "th"
+FULL_DEMO_CHUNK_SECONDS = 15.0
+FULL_DEMO_MIN_CHUNK_SECONDS = 1.0
+FULL_DEMO_PAUSE_SECONDS = 0.3
+FULL_DEMO_SILENCE_THRESHOLD = 0.015
+FULL_DEMO_DYNAMIC_CHUNKING = True
 
 
 class FullDemoSession:
@@ -86,7 +90,10 @@ def display_full_demo_ui(repo_root: Path = REPO_ROOT) -> None:
         return
 
     session = FullDemoSession(repo_root)
-    state: Dict[str, Any] = {}
+    state: Dict[str, Any] = {
+        "mode": "recording",
+        "source": "Audio 1 - Beauty",
+    }
 
     display(HTML(_style_block()))
     title = widgets.HTML(
@@ -101,128 +108,128 @@ def display_full_demo_ui(repo_root: Path = REPO_ROOT) -> None:
         """
     )
 
-    mode = widgets.ToggleButtons(
-        options=[
-            ("Recording", "recording"),
-            ("Live replay", "live_file"),
-            ("Live mic", "live_mic"),
-        ],
-        value="recording",
-        description="Mode",
-        style={"description_width": "72px"},
-    )
-    source = widgets.Dropdown(
-        options=[
-            ("Audio 1 sample", "Audio 1 - Beauty"),
-            ("Audio 2 sample", "Audio 2 - Tech"),
-            ("Upload audio", "upload"),
-            ("Microphone", "mic"),
-        ],
-        value="Audio 1 - Beauty",
-        description="Audio",
-        style={"description_width": "72px"},
-    )
     upload = widgets.FileUpload(
         accept="audio/*",
         multiple=False,
-        description="Upload",
-        layout=widgets.Layout(width="160px"),
-    )
-    provider = widgets.Dropdown(
-        options=[
-            ("OpenAI Whisper", "openai_whisper"),
-            ("Typhoon Whisper", "typhoon_whisper"),
-        ],
-        value="openai_whisper",
-        description="ASR",
-        style={"description_width": "72px"},
-    )
-    model = widgets.Text(
-        value="base",
-        description="Model",
-        placeholder="base, large, turbo, large-v3",
-        style={"description_width": "72px"},
-        layout=widgets.Layout(width="260px"),
-    )
-    use_cached = widgets.Checkbox(
-        value=True,
-        description="Use cached transcript for Audio 1 when available",
-        indent=False,
-    )
-    install_deps = widgets.Checkbox(
-        value=False,
-        description="Install optional ASR dependencies before run",
-        indent=False,
-    )
-    dynamic_chunking = widgets.Checkbox(
-        value=True,
-        description="Pause-aware chunking",
-        indent=False,
-    )
-    chunk_seconds = widgets.FloatSlider(
-        value=8.0,
-        min=2.0,
-        max=20.0,
-        step=1.0,
-        description="Max chunk",
-        readout_format=".0f",
-        style={"description_width": "84px"},
-    )
-    pause_seconds = widgets.FloatSlider(
-        value=0.7,
-        min=0.2,
-        max=2.0,
-        step=0.1,
-        description="Pause",
-        readout_format=".1f",
-        style={"description_width": "84px"},
-    )
-    mic_chunks = widgets.IntSlider(
-        value=6,
-        min=1,
-        max=20,
-        step=1,
-        description="Mic chunks",
-        style={"description_width": "84px"},
+        description="Choose audio file",
+        layout=widgets.Layout(width="220px"),
     )
     run_button = widgets.Button(
-        description="Run Demo",
+        description="Process Recording",
         button_style="danger",
         icon="play",
-        layout=widgets.Layout(width="140px"),
+        layout=widgets.Layout(width="210px", height="44px"),
     )
     refresh_button = widgets.Button(
         description="Refresh Catalog",
         icon="refresh",
-        layout=widgets.Layout(width="150px"),
+        layout=widgets.Layout(width="170px", height="36px"),
     )
 
     output = widgets.Output()
     viewer = widgets.Output()
     catalog_output = widgets.Output()
-    form_output = widgets.Output()
+    source_detail = widgets.VBox()
+    selected_summary = widgets.HTML()
+
+    mode_buttons: Dict[str, Any] = {
+        "recording": widgets.Button(
+            description="Recording",
+            icon="file-audio-o",
+            tooltip="Process the full audio first, then show captions and actions.",
+            layout=widgets.Layout(width="168px", height="48px"),
+        ),
+        "live": widgets.Button(
+            description="Live",
+            icon="play-circle",
+            tooltip="Release chunks only after playback or speech reaches them.",
+            layout=widgets.Layout(width="168px", height="48px"),
+        ),
+    }
+    source_buttons: Dict[str, Any] = {}
+    source_cards = [
+        _source_card_widget(
+            widgets,
+            key="Audio 1 - Beauty",
+            title="Audio 1",
+            subtitle="Beauty live stream",
+            thumb="A1",
+            tone="beauty",
+            icon="shopping-bag",
+            source_buttons=source_buttons,
+        ),
+        _source_card_widget(
+            widgets,
+            key="Audio 2 - Tech",
+            title="Audio 2",
+            subtitle="Tech live stream",
+            thumb="A2",
+            tone="tech",
+            icon="bolt",
+            source_buttons=source_buttons,
+        ),
+        _source_card_widget(
+            widgets,
+            key="upload",
+            title="Upload",
+            subtitle="Use your own audio file",
+            thumb="UP",
+            tone="upload",
+            icon="upload",
+            source_buttons=source_buttons,
+        ),
+        _source_card_widget(
+            widgets,
+            key="mic",
+            title="Mic",
+            subtitle="Speak from browser mic",
+            thumb="MC",
+            tone="mic",
+            icon="microphone",
+            source_buttons=source_buttons,
+        ),
+    ]
 
     controls = widgets.VBox(
         [
-            widgets.HTML('<div class="lc-panel-title">Run Controls</div>'),
-            widgets.HBox([mode, source, upload]),
-            widgets.HBox([provider, model, run_button]),
-            widgets.HBox([chunk_seconds, pause_seconds, mic_chunks]),
-            widgets.HBox([use_cached, dynamic_chunking]),
-            widgets.HBox([install_deps, refresh_button]),
+            widgets.HTML('<div class="lc-panel-title">Studio Setup</div>'),
             widgets.HTML(
-                '<div class="lc-note">Recording mode processes the full speech first. '
-                "Live replay waits for playback to pass each chunk. Live mic records "
-                "continuously into a queue while ASR/actions consume chunks.</div>"
+                '<div class="lc-copy">Choose a workflow, then pick the audio source. '
+                "The ASR and chunking defaults are fixed for this demo.</div>"
+            ),
+            widgets.HBox(
+                [mode_buttons["recording"], mode_buttons["live"]],
+                layout=widgets.Layout(gap="10px", flex_flow="row wrap"),
+            ),
+            widgets.HTML('<div class="lc-subtitle">Audio source</div>'),
+            widgets.GridBox(
+                source_cards,
+                layout=widgets.Layout(
+                    grid_template_columns="repeat(2, minmax(0, 1fr))",
+                    grid_gap="10px",
+                    width="100%",
+                ),
+            ),
+            source_detail,
+            selected_summary,
+            run_button,
+            widgets.HTML(
+                '<div class="lc-defaults">'
+                "<strong>Fixed ASR setup:</strong> OpenAI Whisper turbo, Thai, "
+                "pause-aware chunks up to 15s, pause 0.3s, silence threshold 0.015, "
+                "no chunk cap."
+                "</div>"
             ),
         ],
-        layout=widgets.Layout(width="100%"),
+        layout=widgets.Layout(width="100%", gap="10px"),
     )
+    controls.add_class("lc-operator-panel")
 
     def current_audio_path() -> Optional[Path]:
-        if source.value in SAMPLE_AUDIO:
-            return SAMPLE_AUDIO[str(source.value)]
-        if source.value == "upload":
+        source_key = str(state["source"])
+        if source_key in SAMPLE_AUDIO:
+            return SAMPLE_AUDIO[source_key]
+        if source_key == "upload":
             return save_uploaded_audio(upload, session.upload_dir)
         return None
 
@@ -232,31 +239,122 @@ def display_full_demo_ui(repo_root: Path = REPO_ROOT) -> None:
             catalog_output.clear_output(wait=True)
             display(HTML(build_catalog_scene_html(session.catalog, session.promotions)))
 
+    def selected_source_label() -> str:
+        source_key = str(state["source"])
+        if source_key == "upload":
+            return "uploaded audio"
+        if source_key == "mic":
+            return "browser microphone"
+        return source_key
+
+    def selected_mode_label() -> str:
+        return "Live" if state["mode"] == "live" else "Recording"
+
+    def refresh_selection_ui(render_idle: bool = True) -> None:
+        for key, button in mode_buttons.items():
+            button.button_style = "danger" if key == state["mode"] else ""
+        for key, button in source_buttons.items():
+            button.button_style = "danger" if key == state["source"] else ""
+
+        if state["mode"] == "live" and state["source"] == "mic":
+            run_button.description = "Start Live Mic"
+            run_button.icon = "microphone"
+        elif state["mode"] == "live":
+            run_button.description = "Start Live Replay"
+            run_button.icon = "play"
+        elif state["source"] == "mic":
+            run_button.description = "Record and Process"
+            run_button.icon = "microphone"
+        else:
+            run_button.description = "Process Recording"
+            run_button.icon = "play"
+
+        selected_summary.value = (
+            '<div class="lc-selected-summary">'
+            f"<strong>{html.escape(selected_mode_label())}</strong> using "
+            f"<strong>{html.escape(selected_source_label())}</strong>"
+            "</div>"
+        )
+
+        if state["source"] == "upload":
+            source_detail.children = [
+                widgets.HTML(
+                    '<div class="lc-source-detail">Upload an audio file, then run the '
+                    "selected mode. Recording processes the full file; Live replays it "
+                    "as a timed stream.</div>"
+                ),
+                upload,
+            ]
+        elif state["source"] == "mic":
+            source_detail.children = [
+                widgets.HTML(
+                    '<div class="lc-source-detail">Mic source uses Colab browser audio. '
+                    "Recording captures one 15s clip. Live keeps recording into a queue "
+                    "until you stop it from the browser debug panel.</div>"
+                )
+            ]
+        else:
+            source_detail.children = [
+                widgets.HTML(
+                    f'<div class="lc-source-detail">{html.escape(selected_source_label())} '
+                    "is bundled with the repo and ready to run.</div>"
+                )
+            ]
+
+        if render_idle:
+            render_idle_viewer()
+
+    def set_mode(value: str) -> None:
+        state["mode"] = value
+        refresh_selection_ui()
+
+    def set_source(value: str) -> None:
+        state["source"] = value
+        refresh_selection_ui()
+
+    for key, button in mode_buttons.items():
+        button.on_click(lambda _button, key=key: set_mode(key))
+    for key, button in source_buttons.items():
+        button.on_click(lambda _button, key=key: set_source(key))
+
+    def render_idle_viewer() -> None:
+        audio_path = current_audio_path()
+        with viewer:
+            viewer.clear_output(wait=True)
+            display(
+                HTML(
+                    build_viewer_scene_html(
+                        audio_path=audio_path,
+                        captions=CaptionResult(
+                            language=FULL_DEMO_LANGUAGE,
+                            segments=[],
+                            duration_seconds=None,
+                        ),
+                        actions=[],
+                        mode_label=f"{selected_mode_label()} ready",
+                        title="Ready to run ASR + commerce actions",
+                    )
+                )
+            )
+
     def run_demo(_: Any) -> None:
         with output:
             output.clear_output(wait=True)
-            print("Starting demo run...")
+            print(
+                "Starting "
+                f"{selected_mode_label().lower()} demo with {selected_source_label()}..."
+            )
         with viewer:
             viewer.clear_output(wait=True)
 
         try:
-            if install_deps.value:
-                subprocess.check_call(
-                    [
-                        sys.executable,
-                        "-m",
-                        "pip",
-                        "install",
-                        "-q",
-                        "-r",
-                        str(repo_root / "requirements-asr.txt"),
-                    ]
-                )
-
-            if mode.value == "recording":
+            if state["mode"] == "recording":
                 audio_path = (
-                    record_colab_mic_clip(session.upload_dir, max_seconds=float(chunk_seconds.value))
-                    if source.value == "mic"
+                    record_colab_mic_clip(
+                        session.upload_dir,
+                        max_seconds=FULL_DEMO_CHUNK_SECONDS,
+                    )
+                    if state["source"] == "mic"
                     else current_audio_path()
                 )
                 if audio_path is None:
@@ -264,13 +362,14 @@ def display_full_demo_ui(repo_root: Path = REPO_ROOT) -> None:
                 summary, captions, actions = run_recording_pipeline(
                     session=session,
                     audio_path=audio_path,
-                    source_key=str(source.value),
-                    asr_provider=str(provider.value),
-                    asr_model=model.value.strip() or default_asr_model(str(provider.value)),
-                    use_cached=bool(use_cached.value),
-                    dynamic_chunking=bool(dynamic_chunking.value),
-                    chunk_seconds=float(chunk_seconds.value),
-                    pause_seconds=float(pause_seconds.value),
+                    source_key=str(state["source"]),
+                    asr_provider=FULL_DEMO_ASR_PROVIDER,
+                    asr_model=FULL_DEMO_ASR_MODEL,
+                    use_cached=False,
+                    dynamic_chunking=FULL_DEMO_DYNAMIC_CHUNKING,
+                    chunk_seconds=FULL_DEMO_CHUNK_SECONDS,
+                    pause_seconds=FULL_DEMO_PAUSE_SECONDS,
+                    silence_threshold=FULL_DEMO_SILENCE_THRESHOLD,
                 )
                 render_summary(summary, output)
                 with viewer:
@@ -287,18 +386,21 @@ def display_full_demo_ui(repo_root: Path = REPO_ROOT) -> None:
                     )
                 state["last_summary"] = summary
 
-            elif mode.value == "live_file":
+            elif state["source"] != "mic":
                 audio_path = current_audio_path()
                 if audio_path is None:
                     raise RuntimeError("Live replay requires sample audio or uploaded audio.")
                 config = RealtimeAudioFileDemoConfig(
                     audio_path=audio_path,
-                    chunk_seconds=float(chunk_seconds.value),
-                    dynamic_chunking=bool(dynamic_chunking.value),
-                    pause_seconds=float(pause_seconds.value),
-                    language="th",
-                    asr_provider=str(provider.value),
-                    asr_model=model.value.strip() or default_asr_model(str(provider.value)),
+                    chunk_seconds=FULL_DEMO_CHUNK_SECONDS,
+                    dynamic_chunking=FULL_DEMO_DYNAMIC_CHUNKING,
+                    min_chunk_seconds=FULL_DEMO_MIN_CHUNK_SECONDS,
+                    pause_seconds=FULL_DEMO_PAUSE_SECONDS,
+                    silence_threshold=FULL_DEMO_SILENCE_THRESHOLD,
+                    max_chunks=None,
+                    language=FULL_DEMO_LANGUAGE,
+                    asr_provider=FULL_DEMO_ASR_PROVIDER,
+                    asr_model=FULL_DEMO_ASR_MODEL,
                     install_asr_deps=False,
                     output_dir=session.output_dir / "live_replay",
                     catalog_path=session.catalog_path,
@@ -320,17 +422,19 @@ def display_full_demo_ui(repo_root: Path = REPO_ROOT) -> None:
                                 title="Real-time gated file stream result",
                             )
                         )
-                    )
+                )
                 state["last_summary"] = summary
 
             else:
                 config = LiveMicDemoConfig(
-                    chunk_seconds=float(chunk_seconds.value),
-                    pause_seconds=float(pause_seconds.value),
-                    max_chunks=int(mic_chunks.value),
-                    language="th",
-                    asr_provider=str(provider.value),
-                    asr_model=model.value.strip() or default_asr_model(str(provider.value)),
+                    chunk_seconds=FULL_DEMO_CHUNK_SECONDS,
+                    min_chunk_seconds=FULL_DEMO_MIN_CHUNK_SECONDS,
+                    pause_seconds=FULL_DEMO_PAUSE_SECONDS,
+                    silence_threshold=FULL_DEMO_SILENCE_THRESHOLD,
+                    max_chunks=None,
+                    language=FULL_DEMO_LANGUAGE,
+                    asr_provider=FULL_DEMO_ASR_PROVIDER,
+                    asr_model=FULL_DEMO_ASR_MODEL,
                     install_asr_deps=False,
                     show_debug_panel=True,
                     continuous_recording=True,
@@ -365,28 +469,93 @@ def display_full_demo_ui(repo_root: Path = REPO_ROOT) -> None:
     refresh_button.on_click(refresh_catalog)
 
     form_ui = build_catalog_forms(session, refresh_catalog)
+    form_ui.add_class("lc-form-panel")
+    demo_page = widgets.HBox(
+        [
+            widgets.VBox(
+                [controls, output],
+                layout=widgets.Layout(width="36%", min_width="320px", gap="10px"),
+            ),
+            widgets.VBox([viewer], layout=widgets.Layout(width="64%")),
+        ],
+        layout=widgets.Layout(align_items="stretch", gap="14px"),
+    )
+    catalog_page = widgets.VBox(
+        [
+            widgets.HBox(
+                [
+                    widgets.HTML(
+                        '<div><div class="lc-panel-title">Catalog and Promotions</div>'
+                        '<div class="lc-copy">Review demo commerce data or add temporary '
+                        "products and promotions for this notebook session.</div></div>"
+                    ),
+                    refresh_button,
+                ],
+                layout=widgets.Layout(
+                    justify_content="space-between",
+                    align_items="center",
+                    margin="0 0 10px 0",
+                ),
+            ),
+            widgets.HBox(
+                [
+                    widgets.VBox([catalog_output], layout=widgets.Layout(width="62%")),
+                    widgets.VBox([form_ui], layout=widgets.Layout(width="38%")),
+                ],
+                layout=widgets.Layout(align_items="flex-start", gap="14px"),
+            ),
+        ],
+        layout=widgets.Layout(width="100%"),
+    )
+    tabs = widgets.Tab(children=[demo_page, catalog_page])
+    tabs.set_title(0, "ASR + Actions")
+    tabs.set_title(1, "Catalog")
     app = widgets.VBox(
         [
             title,
-            widgets.HBox(
-                [
-                    widgets.VBox([controls, output], layout=widgets.Layout(width="38%")),
-                    widgets.VBox([viewer], layout=widgets.Layout(width="62%")),
-                ],
-                layout=widgets.Layout(align_items="stretch"),
-            ),
-            widgets.HTML('<div class="lc-section-title">Catalog & Promotion Scene</div>'),
-            widgets.HBox(
-                [
-                    widgets.VBox([catalog_output], layout=widgets.Layout(width="58%")),
-                    widgets.VBox([form_ui, form_output], layout=widgets.Layout(width="42%")),
-                ],
-                layout=widgets.Layout(align_items="flex-start"),
-            ),
+            tabs,
         ]
     )
     display(app)
+    refresh_selection_ui(render_idle=True)
     refresh_catalog()
+
+
+def _source_card_widget(
+    widgets: Any,
+    key: str,
+    title: str,
+    subtitle: str,
+    thumb: str,
+    tone: str,
+    icon: str,
+    source_buttons: Dict[str, Any],
+) -> Any:
+    thumb_html = widgets.HTML(
+        f"""
+        <div class="lc-source-thumb lc-source-thumb-{html.escape(tone)}">
+          <span>{html.escape(thumb)}</span>
+        </div>
+        """
+    )
+    button = widgets.Button(
+        description=title,
+        icon=icon,
+        tooltip=subtitle,
+        layout=widgets.Layout(width="100%", height="38px"),
+    )
+    button.add_class("lc-source-button")
+    source_buttons[key] = button
+    card = widgets.VBox(
+        [
+            thumb_html,
+            button,
+            widgets.HTML(f'<div class="lc-source-caption">{html.escape(subtitle)}</div>'),
+        ],
+        layout=widgets.Layout(width="100%"),
+    )
+    card.add_class("lc-source-card")
+    return card
 
 
 def run_recording_pipeline(
@@ -399,6 +568,7 @@ def run_recording_pipeline(
     dynamic_chunking: bool,
     chunk_seconds: float,
     pause_seconds: float,
+    silence_threshold: float,
 ) -> Tuple[Dict[str, Any], CaptionResult, List[CommerceAction]]:
     cached_path = SAMPLE_CACHED_TRANSCRIPTS.get(source_key)
     output_dir = session.output_dir / "recording"
@@ -416,7 +586,9 @@ def run_recording_pipeline(
             whisper_model=asr_model,
             asr_chunk_length_seconds=int(chunk_seconds),
             asr_dynamic_chunking=dynamic_chunking,
+            asr_min_chunk_seconds=FULL_DEMO_MIN_CHUNK_SECONDS,
             asr_pause_seconds=pause_seconds,
+            asr_silence_threshold=silence_threshold,
             asr_max_new_tokens=256,
             allow_cached_fallback=False,
         )
@@ -757,7 +929,7 @@ def save_promotions_csv(promotions: Sequence[Promotion], path: Path) -> None:
 
 
 def default_asr_model(provider: str) -> str:
-    return "turbo" if provider == "typhoon_whisper" else "base"
+    return "turbo" if provider in {"openai_whisper", "typhoon_whisper"} else "turbo"
 
 
 def _audio_data_uri(audio_path: Path) -> str:
@@ -776,9 +948,9 @@ def _product_card_html(item: ProductCatalogItem) -> str:
   <div class="lc-product-thumb">{html.escape(initials)}</div>
   <div>
     <strong>{html.escape(item.product_name)}</strong>
-    <div class="lc-muted">{html.escape(item.brand)} · {html.escape(item.category)}</div>
+    <div class="lc-muted">{html.escape(item.brand)} &middot; {html.escape(item.category)}</div>
     <div class="lc-price">THB {item.discount_price} <s>{item.price}</s></div>
-    <div class="lc-muted">Stock {item.stock} · Compatible: {html.escape(compatible)}</div>
+    <div class="lc-muted">Stock {item.stock} &middot; Compatible: {html.escape(compatible)}</div>
     <div class="lc-tags">{tags}</div>
   </div>
 </div>
@@ -790,7 +962,7 @@ def _promo_card_html(promotion: Promotion) -> str:
 <div class="lc-promo-card">
   <div class="lc-promo-code">{html.escape(promotion.promo_code)}</div>
   <strong>{html.escape(promotion.promo_description)}</strong>
-  <div class="lc-muted">{html.escape(promotion.discount_type)} · {promotion.discount_value}</div>
+  <div class="lc-muted">{html.escape(promotion.discount_type)} &middot; {promotion.discount_value}</div>
   <div class="lc-muted">Categories: {html.escape(', '.join(promotion.eligible_categories) or 'Any')}</div>
   <div class="lc-muted">SKUs: {html.escape(', '.join(promotion.eligible_skus) or 'Any')}</div>
 </div>
@@ -809,37 +981,54 @@ def _initials(value: str) -> str:
 def _style_block() -> str:
     return """
 <style>
-.lc-header{display:flex;justify-content:space-between;align-items:flex-start;padding:16px 18px;background:#111827;color:#fff;border-radius:8px;margin-bottom:12px}
-.lc-header h1{font-size:24px;line-height:1.15;margin:4px 0 0 0;letter-spacing:0}
-.lc-eyebrow{font-size:12px;text-transform:uppercase;color:#fca5a5;font-weight:700}
-.lc-status-pill{border:1px solid #4b5563;border-radius:999px;padding:6px 10px;font-size:12px;color:#e5e7eb}
-.lc-panel-title{font-weight:700;font-size:15px;margin:0 0 8px 0;color:#111827}
-.lc-section-title{font-weight:700;font-size:18px;margin:16px 0 10px 0;color:#111827}
-.lc-note{font-size:12px;color:#667085;line-height:1.45;margin-top:6px}
-.lc-viewer{display:grid;grid-template-columns:minmax(0,1.25fr) minmax(260px,.75fr);gap:12px;border:1px solid #d0d5dd;border-radius:8px;padding:12px;background:#fff;margin-bottom:12px}
-.lc-video-art{height:360px;background:#111827;border-radius:8px;position:relative;overflow:hidden}
-.lc-video-art:before{content:"";position:absolute;inset:0;background:linear-gradient(135deg,#1f2937,#991b1b)}
-.lc-video-badge{position:absolute;top:12px;left:12px;background:#fff;color:#111827;border-radius:999px;padding:6px 10px;font-size:12px;font-weight:700}
-.lc-host-frame{position:absolute;left:50%;top:54%;transform:translate(-50%,-50%);width:170px;height:220px}
-.lc-host-head{width:76px;height:76px;border-radius:50%;background:#f3f4f6;margin:0 auto 8px auto}
-.lc-host-body{width:150px;height:130px;border-radius:42px 42px 10px 10px;background:#ef4444;margin:0 auto}
-.lc-video-caption{position:absolute;left:18px;right:18px;bottom:18px;background:rgba(17,24,39,.84);color:#fff;border-radius:8px;padding:12px;font-size:16px;line-height:1.4;min-height:48px}
-.lc-audio{width:100%;margin-top:8px}
-.lc-no-audio{border:1px solid #d0d5dd;border-radius:8px;padding:10px;margin-top:8px;color:#667085}
-.lc-action-rail{min-height:360px}
-.lc-stats{display:flex;gap:8px;margin-bottom:8px}
-.lc-stats span{background:#f2f4f7;border-radius:999px;padding:4px 8px;font-size:12px}
+.lc-header{display:flex;justify-content:space-between;align-items:flex-start;padding:22px 24px;background:#171717;color:#fff;border-radius:8px;margin-bottom:14px;border:1px solid #2f2f2f}
+.lc-header h1{font-size:30px;line-height:1.1;margin:6px 0 0 0;letter-spacing:0;font-weight:800;color:#f9fafb}
+.lc-eyebrow{font-size:12px;text-transform:uppercase;color:#fca5a5;font-weight:800}
+.lc-status-pill{border:1px solid #525252;border-radius:999px;padding:7px 12px;font-size:12px;color:#e5e7eb;background:#262626}
+.lc-panel-title{font-weight:800;font-size:17px;margin:0 0 8px 0;color:#111827}
+.lc-subtitle{font-size:12px;font-weight:800;text-transform:uppercase;color:#6b7280;margin-top:6px}
+.lc-copy{font-size:13px;color:#475467;line-height:1.45;margin-bottom:4px}
+.lc-operator-panel{background:#fff;border:1px solid #d0d5dd;border-radius:8px;padding:14px;box-shadow:0 8px 24px rgba(16,24,40,.06)}
+.lc-source-card{background:#fff;border:1px solid #e5e7eb;border-radius:8px;padding:10px;box-shadow:0 2px 8px rgba(16,24,40,.04)}
+.lc-form-panel{background:#fff;border:1px solid #d0d5dd;border-radius:8px;padding:10px}
+.lc-defaults,.lc-source-detail,.lc-selected-summary{border:1px solid #eaecf0;border-radius:8px;background:#f9fafb;color:#344054;font-size:12px;line-height:1.45;padding:10px}
+.lc-selected-summary{background:#fff7ed;border-color:#fed7aa;color:#7c2d12}
+.lc-source-thumb{height:94px;border-radius:8px;display:flex;align-items:center;justify-content:center;overflow:hidden;margin-bottom:8px;border:1px solid #e5e7eb;position:relative}
+.lc-source-thumb:before{content:"";position:absolute;inset:0;background:linear-gradient(135deg,rgba(255,255,255,.12),rgba(255,255,255,0))}
+.lc-source-thumb span{position:relative;display:flex;align-items:center;justify-content:center;width:54px;height:54px;border-radius:50%;background:rgba(255,255,255,.88);color:#111827;font-weight:900}
+.lc-source-thumb-beauty{background:#fecaca}
+.lc-source-thumb-tech{background:#bae6fd}
+.lc-source-thumb-upload{background:#d9f99d}
+.lc-source-thumb-mic{background:#ddd6fe}
+.lc-source-caption{font-size:12px;color:#667085;line-height:1.3;min-height:30px;text-align:center}
+.lc-source-button{border-radius:8px!important;font-weight:800!important}
+.lc-viewer{display:grid;grid-template-columns:minmax(0,1.25fr) minmax(260px,.75fr);gap:14px;border:1px solid #d0d5dd;border-radius:8px;padding:14px;background:#fff;margin-bottom:12px;box-shadow:0 8px 24px rgba(16,24,40,.06)}
+.lc-video-art{height:390px;background:#171717;border-radius:8px;position:relative;overflow:hidden}
+.lc-video-art:before{content:"";position:absolute;inset:0;background:linear-gradient(145deg,#171717 0%,#7f1d1d 54%,#0f766e 100%)}
+.lc-video-art:after{content:"LIVE COMMERCE";position:absolute;right:18px;top:18px;color:rgba(255,255,255,.18);font-size:30px;font-weight:900;letter-spacing:0}
+.lc-video-badge{position:absolute;top:14px;left:14px;background:#fff;color:#111827;border-radius:999px;padding:7px 11px;font-size:12px;font-weight:800;box-shadow:0 8px 20px rgba(0,0,0,.18)}
+.lc-host-frame{position:absolute;left:50%;top:54%;transform:translate(-50%,-50%);width:190px;height:240px}
+.lc-host-head{width:82px;height:82px;border-radius:50%;background:#fff7ed;margin:0 auto 8px auto;border:5px solid rgba(255,255,255,.42)}
+.lc-host-body{width:168px;height:142px;border-radius:48px 48px 10px 10px;background:#ef4444;margin:0 auto;box-shadow:0 18px 60px rgba(0,0,0,.28)}
+.lc-video-caption{position:absolute;left:18px;right:18px;bottom:18px;background:rgba(17,24,39,.88);color:#fff;border-radius:8px;padding:13px 14px;font-size:16px;line-height:1.45;min-height:52px}
+.lc-audio{width:100%;margin-top:10px}
+.lc-no-audio{border:1px solid #d0d5dd;border-radius:8px;padding:10px;margin-top:10px;color:#667085;background:#f9fafb}
+.lc-action-rail{min-height:390px;color:#111827}
+.lc-stats{display:flex;gap:8px;margin-bottom:10px}
+.lc-stats span{background:#f2f4f7;border-radius:999px;padding:4px 9px;font-size:12px;color:#344054}
 .lc-live-actions{display:flex;flex-direction:column;gap:8px}
-.lc-action-card,.lc-product-card,.lc-promo-card{border:1px solid #d0d5dd;border-radius:8px;padding:10px;background:#fff}
-.lc-action-type{font-size:11px;color:#b42318;font-weight:700;margin-bottom:3px}
-.lc-catalog-grid{display:grid;grid-template-columns:1.4fr .9fr;gap:12px}
-.lc-card-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:8px}
-.lc-product-card{display:grid;grid-template-columns:56px minmax(0,1fr);gap:10px}
-.lc-product-thumb{width:54px;height:54px;border-radius:8px;background:#fee2e2;color:#991b1b;display:flex;align-items:center;justify-content:center;font-weight:800}
-.lc-price{font-weight:700;margin:4px 0}.lc-price s{color:#667085;font-weight:400;margin-left:6px}
+.lc-action-card,.lc-product-card,.lc-promo-card{border:1px solid #d0d5dd;border-radius:8px;padding:11px;background:#fff;color:#111827;box-shadow:0 2px 8px rgba(16,24,40,.04)}
+.lc-action-type{font-size:11px;color:#b42318;font-weight:800;margin-bottom:4px}
+.lc-catalog-grid{display:grid;grid-template-columns:1.35fr .9fr;gap:14px}
+.lc-card-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:10px}
+.lc-product-card{display:grid;grid-template-columns:64px minmax(0,1fr);gap:12px}
+.lc-product-card strong,.lc-promo-card strong{color:#111827}
+.lc-product-thumb{width:62px;height:62px;border-radius:8px;background:#fee2e2;color:#991b1b;display:flex;align-items:center;justify-content:center;font-weight:900}
+.lc-price{font-weight:800;margin:5px 0;color:#111827}.lc-price s{color:#667085;font-weight:400;margin-left:6px}
 .lc-muted{color:#667085;font-size:12px;line-height:1.35}
-.lc-tags{display:flex;flex-wrap:wrap;gap:4px;margin-top:6px}
-.lc-tags span{background:#f2f4f7;border-radius:999px;padding:2px 6px;font-size:11px;color:#344054}
-.lc-promo-code{font-weight:800;color:#b42318;font-size:13px;margin-bottom:4px}
+.lc-tags{display:flex;flex-wrap:wrap;gap:5px;margin-top:7px}
+.lc-tags span{background:#f2f4f7;border-radius:999px;padding:2px 7px;font-size:11px;color:#344054}
+.lc-promo-code{font-weight:900;color:#b42318;font-size:15px;margin-bottom:5px}
+@media (max-width: 960px){.lc-viewer,.lc-catalog-grid{grid-template-columns:1fr}.lc-header{flex-direction:column;gap:10px}}
 </style>
 """
