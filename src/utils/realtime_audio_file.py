@@ -440,7 +440,7 @@ def _build_realtime_audio_file_html(
       <div class="rt-muted">Audio is released to ASR only as stream time advances. Seeking is disabled for this demo.</div>
       <div class="rt-buttons">
         <button data-role="start">Start / Continue</button>
-        <button data-role="stop" disabled>Stop input</button>
+        <button data-role="stop">Stop input</button>
       </div>
       <div class="rt-metrics">
         <div class="rt-metric"><div class="rt-muted">Playback</div><strong data-role="time">0.00s / {duration:.2f}s</strong></div>
@@ -467,6 +467,7 @@ def _build_realtime_audio_file_js(widget_id: str, poll_seconds: float) -> str:
   const pollMilliseconds = {poll_milliseconds};
   const get = role => root.querySelector(`[data-role="${{role}}"]`);
   let stopRequested = false;
+  let pendingStartResolve = null;
   const duration = () => audio.duration && Number.isFinite(audio.duration) ? audio.duration : 0;
   const updateTime = () => {{
     const total = duration();
@@ -482,6 +483,11 @@ def _build_realtime_audio_file_js(widget_id: str, poll_seconds: float) -> str:
     stopButton.disabled = true;
     get("state").textContent = "stopped";
     get("detail").textContent = "Input stopped. Already released chunks will finish processing.";
+    if (pendingStartResolve) {{
+      const resolve = pendingStartResolve;
+      pendingStartResolve = null;
+      resolve(apiRoot[{json.dumps(widget_id)}].getStatus());
+    }}
   }};
   startButton.onclick = () => {{
     if (stopRequested) return;
@@ -509,7 +515,9 @@ def _build_realtime_audio_file_js(widget_id: str, poll_seconds: float) -> str:
       get("detail").textContent = "Press Start to begin the simulated live stream.";
       if (stopRequested || (!audio.paused && !audio.ended)) return Promise.resolve(this.getStatus());
       return new Promise(resolve => {{
+        pendingStartResolve = resolve;
         const onPlay = () => {{
+          pendingStartResolve = null;
           audio.removeEventListener("play", onPlay);
           audio.removeEventListener("pause", onStop);
           get("state").textContent = "playing";
@@ -518,6 +526,7 @@ def _build_realtime_audio_file_js(widget_id: str, poll_seconds: float) -> str:
         }};
         const onStop = () => {{
           if (!stopRequested) return;
+          pendingStartResolve = null;
           audio.removeEventListener("play", onPlay);
           audio.removeEventListener("pause", onStop);
           resolve(this.getStatus());

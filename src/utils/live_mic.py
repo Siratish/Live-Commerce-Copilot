@@ -694,6 +694,11 @@ def _install_colab_mic_recorder() -> None:
               window.liveCommerceMic.stop = function() {
                 const state = window.liveCommerceMic;
                 state.stopRequested = true;
+                state.bufferDone = true;
+                if (typeof state.resolveStart === 'function') {
+                  state.resolveStart(false);
+                  state.resolveStart = null;
+                }
                 if (state.activeRecorder && state.activeRecorder.state !== 'inactive') {
                   state.activeRecorder.stop();
                 }
@@ -834,7 +839,7 @@ def install_colab_live_mic_debug_panel() -> None:
                   <div class="lm-muted">Stop closes the input; queued chunks still finish processing.</div>
                   <div class="lm-buttons">
                     <button id="mic-debug-start">Start live mic</button>
-                    <button id="mic-debug-stop" disabled>Stop input</button>
+                    <button id="mic-debug-stop">Stop input</button>
                   </div>
                   <div class="lm-metrics">
                     <div class="lm-metric"><div class="lm-muted">Chunk</div><strong id="mic-debug-chunk">-</strong></div>

@@ -7,6 +7,7 @@ import csv
 import html
 import json
 import mimetypes
+import threading
 
 from src.ai.captioning import (
     CaptionResult,
@@ -20,6 +21,11 @@ from src.ai.commerce_actions import generate_commerce_actions, save_commerce_act
 from src.data.catalog import load_product_catalog, load_promotions
 from src.schemas import CommerceAction, ProductCatalogItem, Promotion
 from src.utils.action_timeline import save_action_timeline_html
+from src.utils.live_mic import LiveMicDemoConfig, run_colab_live_mic_demo
+from src.utils.realtime_audio_file import (
+    RealtimeAudioFileDemoConfig,
+    run_realtime_audio_file_demo,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -361,12 +367,14 @@ def display_full_demo_ui(repo_root: Path = REPO_ROOT) -> None:
                 print("Select an audio file to start.")
             return
         state["running"] = True
+        async_started = False
         try:
-            run_demo()
+            async_started = run_demo()
         finally:
-            state["running"] = False
+            if not async_started:
+                state["running"] = False
 
-    def run_demo() -> None:
+    def run_demo() -> bool:
         with output:
             output.clear_output(wait=True)
             print(
@@ -430,62 +438,103 @@ def display_full_demo_ui(repo_root: Path = REPO_ROOT) -> None:
                         )
                     )
                 state["last_summary"] = summary
+                return False
 
             elif state["mode"] == "live":
                 if state["source"] == "mic":
-                    render_summary(
-                        {
-                            "mode": "live",
-                            "source": "mic",
-                            "status": "browser_mic_showcase_ready",
-                        },
-                        output,
-                    )
-                    with viewer:
-                        viewer.clear_output(wait=True)
-                        display(HTML(build_live_mic_showcase_html()))
-                    state["last_summary"] = {"mode": "live", "source": "mic"}
-                    return
+                    start_live_mic_worker()
+                    return True
 
                 audio_path = current_audio_path()
                 if audio_path is None:
                     raise RuntimeError("Live replay requires sample audio or uploaded audio.")
-                if str(state["source"]) not in SAMPLE_CACHED_TRANSCRIPTS:
-                    with viewer:
-                        viewer.clear_output(wait=True)
-                        display(
-                            HTML(
-                                build_processing_scene_html(
-                                    title="Preparing live replay",
-                                    detail="Running OpenAI Whisper turbo before replaying the stream.",
-                                )
-                            )
-                        )
-                summary, captions, actions = run_live_showcase_pipeline(
-                    session=session,
-                    audio_path=audio_path,
-                    source_key=str(state["source"]),
-                    asr_provider=FULL_DEMO_ASR_PROVIDER,
-                    asr_model=FULL_DEMO_ASR_MODEL,
-                )
-                render_summary(summary, output)
-                with viewer:
-                    viewer.clear_output(wait=True)
-                    display(
-                        HTML(
-                            build_live_simulation_scene_html(
-                                audio_path=audio_path,
-                                captions=captions,
-                                actions=actions,
-                                source_label=selected_source_label(),
-                            )
-                        )
-                    )
-                state["last_summary"] = summary
+                start_live_file_worker(audio_path)
+                return True
 
         except Exception as exc:
             with output:
                 print(f"Demo failed: {exc}")
+            return False
+
+        return False
+
+    def start_live_file_worker(audio_path: Path) -> None:
+        source_key = str(state["source"])
+        config = RealtimeAudioFileDemoConfig(
+            audio_path=audio_path,
+            chunk_seconds=FULL_DEMO_CHUNK_SECONDS,
+            dynamic_chunking=FULL_DEMO_DYNAMIC_CHUNKING,
+            min_chunk_seconds=FULL_DEMO_MIN_CHUNK_SECONDS,
+            pause_seconds=FULL_DEMO_PAUSE_SECONDS,
+            silence_threshold=FULL_DEMO_SILENCE_THRESHOLD,
+            max_chunks=None,
+            language=FULL_DEMO_LANGUAGE,
+            asr_provider=FULL_DEMO_ASR_PROVIDER,
+            asr_model=FULL_DEMO_ASR_MODEL,
+            install_asr_deps=False,
+            output_dir=session.output_dir / f"live_replay_{_safe_output_name(source_key)}",
+            catalog_path=session.catalog_path,
+            promotions_path=session.promotions_path,
+        )
+
+        with output:
+            output.clear_output(wait=True)
+            print(
+                f"Live stream panel is starting for {selected_source_label()}. "
+                "Use Start/Stop inside the showcase."
+            )
+
+        def worker() -> None:
+            try:
+                with viewer:
+                    viewer.clear_output(wait=True)
+                    summary = run_realtime_audio_file_demo(config)
+                state["last_summary"] = summary
+                render_summary(summary, output)
+            except Exception as exc:
+                with output:
+                    print(f"Live file demo failed: {exc}")
+            finally:
+                state["running"] = False
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def start_live_mic_worker() -> None:
+        config = LiveMicDemoConfig(
+            chunk_seconds=FULL_DEMO_CHUNK_SECONDS,
+            min_chunk_seconds=FULL_DEMO_MIN_CHUNK_SECONDS,
+            pause_seconds=FULL_DEMO_PAUSE_SECONDS,
+            silence_threshold=FULL_DEMO_SILENCE_THRESHOLD,
+            max_chunks=None,
+            language=FULL_DEMO_LANGUAGE,
+            asr_provider=FULL_DEMO_ASR_PROVIDER,
+            asr_model=FULL_DEMO_ASR_MODEL,
+            install_asr_deps=False,
+            show_debug_panel=True,
+            continuous_recording=True,
+            output_dir=session.output_dir / "live_mic",
+            catalog_path=session.catalog_path,
+            promotions_path=session.promotions_path,
+        )
+
+        with output:
+            output.clear_output(wait=True)
+            print("Live mic panel is starting. Use Start/Stop inside the showcase.")
+
+        def worker() -> None:
+            try:
+                with viewer:
+                    viewer.clear_output(wait=True)
+                    summary = run_colab_live_mic_demo(config)
+                state["last_summary"] = summary
+                render_summary(summary, output)
+            except Exception as exc:
+                with output:
+                    print(f"Live mic demo failed: {exc}")
+            finally:
+                state["running"] = False
+
+        threading.Thread(target=worker, daemon=True).start()
 
     refresh_button.on_click(refresh_catalog)
 
@@ -1472,6 +1521,11 @@ def _initials(value: str) -> str:
     if len(parts) == 1:
         return parts[0][:2].upper()
     return (parts[0][0] + parts[1][0]).upper()
+
+
+def _safe_output_name(value: str) -> str:
+    safe = "".join(ch.lower() if ch.isalnum() else "_" for ch in value)
+    return "_".join(part for part in safe.split("_") if part) or "source"
 
 
 def _style_block() -> str:
