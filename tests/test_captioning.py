@@ -23,6 +23,8 @@ from src.ai.captioning import (
 from src.schemas import CaptionSegment, repair_caption_timestamps, validate_caption_segments
 from src.utils.realtime_audio_file import (
     RealtimeAudioFileDemoConfig,
+    _build_realtime_audio_file_api_call_js,
+    _build_realtime_audio_file_js,
     run_realtime_audio_file_demo,
     write_audio_window_wav,
 )
@@ -308,6 +310,16 @@ class CaptioningTests(unittest.TestCase):
         self.assertIn("data:audio/mpeg;base64,", html)
         self.assertIn("Generating caption", html)
         self.assertIn(result.segments[0].text, html)
+
+    def test_realtime_audio_file_browser_js_retries_and_uses_stream_clock(self) -> None:
+        script = _build_realtime_audio_file_js("demo-widget", 0.25)
+        api_call = _build_realtime_audio_file_api_call_js("demo-widget", "waitForStart")
+
+        self.assertIn("install(attempt + 1)", script)
+        self.assertIn("streamTime()", script)
+        self.assertIn("Browser blocked hidden audio playback", script)
+        self.assertIn("api[methodName]", api_call)
+        self.assertIn("live audio controls were not ready", api_call)
 
     def test_repair_caption_timestamps_clamps_whisper_overlap(self) -> None:
         segments = [

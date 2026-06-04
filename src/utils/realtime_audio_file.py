@@ -108,36 +108,41 @@ class BrowserAudioPlaybackGate:
             return
         try:
             from IPython.display import HTML, Javascript, display  # type: ignore
-            from google.colab import output  # type: ignore  # noqa: F401
+            from google.colab import output  # type: ignore
         except ImportError as exc:
             raise RuntimeError("Browser audio playback gating requires Google Colab.") from exc
 
         display(HTML(_build_realtime_audio_file_html(self.audio_path, self.windows, self.widget_id)))
-        display(Javascript(_build_realtime_audio_file_js(self.widget_id, self.poll_seconds)))
+        script = _build_realtime_audio_file_js(self.widget_id, self.poll_seconds)
+        try:
+            output.eval_js(script)
+        except Exception:
+            display(Javascript(script))
         self._installed = True
 
     def wait_for_start(self) -> Dict[str, Any]:
         from google.colab import output  # type: ignore
 
         return output.eval_js(
-            "window.realtimeAudioFileDemo"
-            f"[{json.dumps(self.widget_id)}].waitForStart()"
+            _build_realtime_audio_file_api_call_js(self.widget_id, "waitForStart")
         )
 
     def wait_until(self, target_seconds: float) -> Dict[str, Any]:
         from google.colab import output  # type: ignore
 
         return output.eval_js(
-            "window.realtimeAudioFileDemo"
-            f"[{json.dumps(self.widget_id)}].waitUntil({float(target_seconds)})"
+            _build_realtime_audio_file_api_call_js(
+                self.widget_id,
+                "waitUntil",
+                [float(target_seconds)],
+            )
         )
 
     def status(self) -> Dict[str, Any]:
         from google.colab import output  # type: ignore
 
         status = output.eval_js(
-            "window.realtimeAudioFileDemo"
-            f"[{json.dumps(self.widget_id)}].getStatus()"
+            _build_realtime_audio_file_api_call_js(self.widget_id, "getStatus")
         )
         return status if isinstance(status, dict) else {}
 
@@ -407,7 +412,7 @@ def _build_realtime_audio_file_html(
 ) -> str:
     duration = max((window.end for window in windows), default=0.0)
     return f"""
-<div id="{widget_id}" style="border:1px solid #d0d5dd;border-radius:8px;padding:14px;font-family:Arial,sans-serif;background:#fff;box-shadow:0 8px 24px rgba(16,24,40,.06);">
+<div id="{widget_id}" data-duration="{duration:.6f}" style="border:1px solid #d0d5dd;border-radius:8px;padding:14px;font-family:Arial,sans-serif;background:#fff;box-shadow:0 8px 24px rgba(16,24,40,.06);">
   <style>
     #{widget_id} .rt-grid{{display:grid;grid-template-columns:minmax(0,1.25fr) minmax(240px,.75fr);gap:14px}}
     #{widget_id} .rt-video{{height:360px;border-radius:8px;background:linear-gradient(145deg,#171717,#7f1d1d 55%,#0f766e);position:relative;overflow:hidden}}
@@ -425,7 +430,7 @@ def _build_realtime_audio_file_html(
     #{widget_id} button{{border:0;border-radius:8px;padding:10px 13px;font-weight:800;cursor:pointer}}
     #{widget_id} [data-role=start]{{background:#b42318;color:#fff}}
     #{widget_id} [data-role=stop]{{background:#f2f4f7;color:#344054}}
-    #{widget_id} [data-role=stop]:disabled{{opacity:.5;cursor:not-allowed}}
+    #{widget_id} button:disabled{{opacity:.5;cursor:not-allowed}}
     #{widget_id} .rt-progress{{height:10px;background:#f2f4f7;border-radius:999px;overflow:hidden;margin-top:8px}}
     #{widget_id} .rt-progress div{{height:100%;width:0%;background:#e51b23}}
     @media (max-width: 900px){{#{widget_id} .rt-grid{{grid-template-columns:1fr}}}}
@@ -443,7 +448,7 @@ def _build_realtime_audio_file_html(
       <div class="rt-panel-title">Live Audio Stream</div>
       <div class="rt-muted">Audio is released to ASR only as stream time advances. Seeking is disabled for this demo.</div>
       <div class="rt-buttons">
-        <button data-role="start">Start / Continue</button>
+        <button data-role="start" disabled>Start / Continue</button>
         <button data-role="stop">Stop input</button>
       </div>
       <div class="rt-metrics">
@@ -463,130 +468,217 @@ def _build_realtime_audio_file_js(widget_id: str, poll_seconds: float) -> str:
     poll_milliseconds = max(50, int(float(poll_seconds) * 1000))
     return f"""
 (() => {{
-  const root = document.getElementById({json.dumps(widget_id)});
-  if (!root) return;
-  const audio = root.querySelector("audio");
-  const startButton = root.querySelector('[data-role="start"]');
-  const stopButton = root.querySelector('[data-role="stop"]');
+  const widgetId = {json.dumps(widget_id)};
   const pollMilliseconds = {poll_milliseconds};
-  const get = role => root.querySelector(`[data-role="${{role}}"]`);
-  let stopRequested = false;
-  let pendingStartResolve = null;
-  const duration = () => audio.duration && Number.isFinite(audio.duration) ? audio.duration : 0;
-  const updateTime = () => {{
-    const total = duration();
-    get("time").textContent = `${{(audio.currentTime || 0).toFixed(2)}}s / ${{total ? total.toFixed(2) : "..."}}s`;
-    const pct = total ? Math.max(0, Math.min(100, (audio.currentTime / total) * 100)) : 0;
-    get("progress").style.width = `${{pct}}%`;
-  }};
-  const apiRoot = window.realtimeAudioFileDemo = window.realtimeAudioFileDemo || {{}};
-  const stopInput = () => {{
-    stopRequested = true;
-    audio.pause();
-    startButton.disabled = true;
-    stopButton.disabled = true;
-    get("state").textContent = "stopped";
-    get("detail").textContent = "Input stopped. Already released chunks will finish processing.";
-    if (pendingStartResolve) {{
-      const resolve = pendingStartResolve;
-      pendingStartResolve = null;
-      resolve(apiRoot[{json.dumps(widget_id)}].getStatus());
+  const install = (attempt = 0) => {{
+    const root = document.getElementById(widgetId);
+    if (!root) {{
+      if (attempt < 100) window.setTimeout(() => install(attempt + 1), 100);
+      return;
     }}
-  }};
-  startButton.onclick = () => {{
-    if (stopRequested) return;
-    audio.play();
-    startButton.disabled = true;
-    stopButton.disabled = false;
-    get("state").textContent = "playing";
-    get("caption").textContent = "Streaming audio into ASR...";
-  }};
-  stopButton.onclick = stopInput;
-  apiRoot[{json.dumps(widget_id)}] = {{
-    getStatus() {{
+    if (root.dataset.realtimeAudioBound === "1") return;
+    root.dataset.realtimeAudioBound = "1";
+
+    const audio = root.querySelector("audio");
+    const startButton = root.querySelector('[data-role="start"]');
+    const stopButton = root.querySelector('[data-role="stop"]');
+    const get = role => root.querySelector(`[data-role="${{role}}"]`);
+    const apiRoot = window.realtimeAudioFileDemo = window.realtimeAudioFileDemo || {{}};
+    let stopRequested = false;
+    let playing = false;
+    let baseSeconds = 0;
+    let startedAtMs = 0;
+    let ticker = null;
+    let pendingStartResolve = null;
+
+    const duration = () => {{
+      const audioDuration = audio && audio.duration && Number.isFinite(audio.duration) ? audio.duration : 0;
+      const configuredDuration = Number(root.dataset.duration || 0);
+      return audioDuration || configuredDuration || 0;
+    }};
+    const streamTime = () => {{
+      const total = duration();
+      const elapsed = playing ? baseSeconds + ((performance.now() - startedAtMs) / 1000) : baseSeconds;
+      return total ? Math.min(total, Math.max(0, elapsed)) : Math.max(0, elapsed);
+    }};
+    const setDetail = text => {{
+      const detail = get("detail");
+      if (detail) detail.textContent = text;
+    }};
+    const updateTime = () => {{
+      const total = duration();
+      const current = streamTime();
+      const time = get("time");
+      const progress = get("progress");
+      if (time) time.textContent = `${{current.toFixed(2)}}s / ${{total ? total.toFixed(2) : "..."}}s`;
+      if (progress) progress.style.width = `${{total ? Math.max(0, Math.min(100, (current / total) * 100)) : 0}}%`;
+      if (playing && total && current >= total) {{
+        playing = false;
+        baseSeconds = total;
+        if (ticker) window.clearTimeout(ticker);
+        ticker = null;
+        const state = get("state");
+        if (state) state.textContent = "ended";
+        setDetail("Live replay finished.");
+      }}
+    }};
+    const scheduleTick = () => {{
+      if (ticker) window.clearTimeout(ticker);
+      ticker = window.setTimeout(() => {{
+        updateTime();
+        if (playing) scheduleTick();
+      }}, pollMilliseconds);
+    }};
+    const getStatus = () => {{
       updateTime();
+      const current = streamTime();
+      const total = duration();
       return {{
-        currentTime: audio.currentTime || 0,
-        paused: audio.paused,
-        ended: audio.ended,
-        duration: duration(),
+        currentTime: current,
+        paused: !playing,
+        ended: Boolean(total && current >= total),
+        duration: total,
         stopped: stopRequested
       }};
-    }},
-    waitForStart() {{
-      updateTime();
-      get("state").textContent = "waiting_for_start";
-      get("detail").textContent = "Press Start to begin the simulated live stream.";
-      if (stopRequested || (!audio.paused && !audio.ended)) return Promise.resolve(this.getStatus());
-      return new Promise(resolve => {{
-        pendingStartResolve = resolve;
-        const onPlay = () => {{
-          pendingStartResolve = null;
-          audio.removeEventListener("play", onPlay);
-          audio.removeEventListener("pause", onStop);
-          get("state").textContent = "playing";
-          get("detail").textContent = "Playback started. Chunks are released by audio time.";
-          resolve(this.getStatus());
-        }};
-        const onStop = () => {{
-          if (!stopRequested) return;
-          pendingStartResolve = null;
-          audio.removeEventListener("play", onPlay);
-          audio.removeEventListener("pause", onStop);
-          resolve(this.getStatus());
-        }};
-        audio.addEventListener("play", onPlay);
-        audio.addEventListener("pause", onStop);
-      }});
-    }},
-    waitUntil(targetSeconds) {{
-      updateTime();
-      get("state").textContent = "waiting_for_playback";
-      get("detail").textContent = `Waiting until playback reaches ${{Number(targetSeconds).toFixed(2)}}s.`;
-      return new Promise(resolve => {{
-        const check = () => {{
-          updateTime();
-          if (stopRequested || (audio.currentTime || 0) >= targetSeconds || audio.ended) {{
-            cleanup();
-            resolve(this.getStatus());
-          }}
-        }};
-        const cleanup = () => {{
-          clearInterval(timer);
-          audio.removeEventListener("timeupdate", check);
-          audio.removeEventListener("seeked", check);
-          audio.removeEventListener("ended", check);
-          audio.removeEventListener("play", check);
-        }};
-        const timer = setInterval(check, pollMilliseconds);
-        audio.addEventListener("timeupdate", check);
-        audio.addEventListener("seeked", check);
-        audio.addEventListener("ended", check);
-        audio.addEventListener("play", check);
-        check();
-      }});
-    }},
-    publish(payload) {{
-      updateTime();
-      if (payload.state) get("state").textContent = payload.state;
-      if (payload.chunkIndex) get("chunk").textContent = `${{payload.chunkIndex}} / ${{payload.totalChunks || "?"}}`;
-      if (payload.queueDepth !== undefined) get("queue").textContent = String(payload.queueDepth);
-      if (payload.status) get("caption").textContent = payload.status;
-      const detail = [];
-      if (payload.status) detail.push(payload.status);
-      if (payload.chunkStart !== undefined && payload.chunkEnd !== undefined) {{
-        detail.push(`chunk ${{Number(payload.chunkStart).toFixed(2)}}-${{Number(payload.chunkEnd).toFixed(2)}}s`);
+    }};
+    const resolveStart = () => {{
+      if (pendingStartResolve) {{
+        const resolve = pendingStartResolve;
+        pendingStartResolve = null;
+        resolve(getStatus());
       }}
-      if (payload.playbackTime !== undefined) detail.push(`playback ${{Number(payload.playbackTime).toFixed(2)}}s`);
-      if (payload.captionCount !== undefined) detail.push(`${{payload.captionCount}} captions`);
-      if (payload.actionCount !== undefined) detail.push(`${{payload.actionCount}} actions`);
-      get("detail").textContent = detail.join(" | ") || "Waiting.";
-    }}
+    }};
+    const startInput = () => {{
+      if (stopRequested) return;
+      baseSeconds = streamTime();
+      startedAtMs = performance.now();
+      playing = true;
+      startButton.disabled = true;
+      stopButton.disabled = false;
+      get("state").textContent = "playing";
+      get("caption").textContent = "Streaming audio into ASR...";
+      setDetail("Playback clock started. Chunks are released by stream time.");
+      if (audio) {{
+        const playResult = audio.play();
+        if (playResult && typeof playResult.catch === "function") {{
+          playResult.catch(() => {{
+            setDetail("Browser blocked hidden audio playback; stream clock is still running.");
+          }});
+        }}
+      }}
+      updateTime();
+      scheduleTick();
+      resolveStart();
+    }};
+    const stopInput = () => {{
+      baseSeconds = streamTime();
+      playing = false;
+      stopRequested = true;
+      if (ticker) window.clearTimeout(ticker);
+      ticker = null;
+      if (audio) audio.pause();
+      startButton.disabled = true;
+      stopButton.disabled = true;
+      get("state").textContent = "stopped";
+      setDetail("Input stopped. Already released chunks will finish processing.");
+      updateTime();
+      resolveStart();
+    }};
+
+    startButton.addEventListener("click", startInput);
+    stopButton.addEventListener("click", stopInput);
+    startButton.disabled = false;
+    stopButton.disabled = false;
+
+    apiRoot[widgetId] = {{
+      start: startInput,
+      stop: stopInput,
+      getStatus,
+      waitForStart() {{
+        updateTime();
+        get("state").textContent = "waiting_for_start";
+        setDetail("Press Start to begin the simulated live stream.");
+        if (stopRequested || playing || streamTime() > 0) return Promise.resolve(getStatus());
+        return new Promise(resolve => {{
+          pendingStartResolve = resolve;
+        }});
+      }},
+      waitUntil(targetSeconds) {{
+        updateTime();
+        get("state").textContent = "waiting_for_playback";
+        setDetail(`Waiting until stream reaches ${{Number(targetSeconds).toFixed(2)}}s.`);
+        return new Promise(resolve => {{
+          const check = () => {{
+            updateTime();
+            if (stopRequested || streamTime() >= Number(targetSeconds) || getStatus().ended) {{
+              window.clearInterval(timer);
+              resolve(getStatus());
+            }}
+          }};
+          const timer = window.setInterval(check, pollMilliseconds);
+          check();
+        }});
+      }},
+      publish(payload) {{
+        updateTime();
+        if (payload.state) get("state").textContent = payload.state;
+        if (payload.chunkIndex) get("chunk").textContent = `${{payload.chunkIndex}} / ${{payload.totalChunks || "?"}}`;
+        if (payload.queueDepth !== undefined) get("queue").textContent = String(payload.queueDepth);
+        if (payload.status) get("caption").textContent = payload.status;
+        const detail = [];
+        if (payload.status) detail.push(payload.status);
+        if (payload.chunkStart !== undefined && payload.chunkEnd !== undefined) {{
+          detail.push(`chunk ${{Number(payload.chunkStart).toFixed(2)}}-${{Number(payload.chunkEnd).toFixed(2)}}s`);
+        }}
+        if (payload.playbackTime !== undefined) detail.push(`stream ${{Number(payload.playbackTime).toFixed(2)}}s`);
+        if (payload.captionCount !== undefined) detail.push(`${{payload.captionCount}} captions`);
+        if (payload.actionCount !== undefined) detail.push(`${{payload.actionCount}} actions`);
+        setDetail(detail.join(" | ") || "Waiting.");
+      }}
+    }};
+    if (audio) audio.addEventListener("loadedmetadata", updateTime);
+    get("state").textContent = "ready";
+    setDetail("Controls ready. Press Start to release audio chunks in real time.");
+    updateTime();
   }};
-  audio.addEventListener("timeupdate", updateTime);
-  audio.addEventListener("loadedmetadata", updateTime);
-  updateTime();
+  install();
 }})();
+"""
+
+
+def _build_realtime_audio_file_api_call_js(
+    widget_id: str,
+    method_name: str,
+    args: Optional[Sequence[Any]] = None,
+) -> str:
+    return f"""
+new Promise((resolve) => {{
+  const widgetId = {json.dumps(widget_id)};
+  const methodName = {json.dumps(method_name)};
+  const args = {json.dumps(list(args or []))};
+  const startedAt = Date.now();
+  const callWhenReady = () => {{
+    const api = window.realtimeAudioFileDemo && window.realtimeAudioFileDemo[widgetId];
+    if (api && typeof api[methodName] === "function") {{
+      Promise.resolve(api[methodName](...args))
+        .then(resolve)
+        .catch(error => resolve({{
+          stopped: true,
+          error: error && (error.message || String(error))
+        }}));
+      return;
+    }}
+    if (Date.now() - startedAt > 10000) {{
+      resolve({{
+        stopped: true,
+        error: "live audio controls were not ready"
+      }});
+      return;
+    }}
+    window.setTimeout(callWhenReady, 100);
+  }};
+  callWhenReady();
+}})
 """
 
 
