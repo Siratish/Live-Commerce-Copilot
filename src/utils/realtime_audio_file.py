@@ -474,6 +474,14 @@ def _realtime_file_result_payload(
 ) -> Dict[str, Any]:
     return {
         "latestCaption": segments[-1].text if segments else "",
+        "captionRows": [
+            {
+                "start": round(segment.start, 3),
+                "end": round(segment.end, 3),
+                "text": segment.text,
+            }
+            for segment in segments[-12:]
+        ],
         "actionRows": [
             {
                 "time": round(action.timestamp, 2),
@@ -609,6 +617,7 @@ def _build_realtime_audio_file_html(
     #{widget_id} .rt-panel-title{{font-weight:800;font-size:24px;line-height:1.16;color:#111827;margin-bottom:10px}}
     #{widget_id} .rt-muted{{color:#667085;font-size:12px;line-height:1.4}}
     #{widget_id} .rt-bottom{{display:grid;grid-template-columns:48px minmax(0,1fr);gap:10px;align-items:center;margin-top:10px}}
+    #{widget_id} .rt-current-action{{margin-top:10px}}
     #{widget_id} button{{border:0;border-radius:8px;padding:10px 13px;font-weight:800;cursor:pointer}}
     #{widget_id} [data-role=start]{{background:#b42318;color:#fff;width:48px;height:42px;display:inline-flex;align-items:center;justify-content:center;font-size:18px}}
     #{widget_id} button:disabled{{opacity:.5;cursor:not-allowed}}
@@ -622,8 +631,8 @@ def _build_realtime_audio_file_html(
     #{widget_id} .rt-action-promo{{border-color:#fed7aa;background:#fff7ed}}
     #{widget_id} .rt-action-bundle{{border-color:#bbf7d0;background:#f0fdf4}}
     #{widget_id} .rt-action-countdown{{border-color:#fecaca;background:#fef2f2}}
-    #{widget_id} .rt-action-type{{font-size:11px;color:#b42318;font-weight:900;margin-bottom:5px;letter-spacing:.04em}}
     #{widget_id} .rt-action-top{{display:flex;justify-content:space-between;align-items:center;gap:8px}}
+    #{widget_id} .rt-action-top strong{{font-size:14px;color:#111827}}
     #{widget_id} .rt-action-title{{font-size:16px;font-weight:800;margin-bottom:4px}}
     #{widget_id} .rt-action-meta{{font-size:14px;color:#111827;line-height:1.35}}
     #{widget_id} .rt-action-time{{font-size:12px;color:#667085;margin-top:6px}}
@@ -638,15 +647,16 @@ def _build_realtime_audio_file_html(
     <div>
       <div class="rt-video">
         <div class="rt-host"><div class="rt-head"></div><div class="rt-body"></div></div>
-        <div class="rt-caption" data-role="caption">Waiting for live transcript...</div>
+        <div class="rt-caption" data-role="caption">Ready to start. Press play to stream audio into ASR.</div>
       </div>
+      <div class="rt-current-action" data-role="current-action"><div class="rt-empty">Current action will appear here.</div></div>
       <div class="rt-bottom">
         <button data-role="start" disabled title="Start stream" aria-label="Start stream">&#9654;</button>
         <div class="rt-progress"><div data-role="progress"></div></div>
       </div>
     </div>
     <div>
-      <div class="rt-panel-title">Live ASR + action preview</div>
+      <div class="rt-panel-title">Action history</div>
       <div class="rt-stats">
         <span data-role="caption-count">0 captions</span>
         <span data-role="action-count">0 actions</span>
@@ -700,6 +710,11 @@ def _build_realtime_audio_file_js(
     let pendingStartResolve = null;
     let readyToStart = false;
     let latestCaption = "";
+    let captionQueue = [];
+    let captionDisplayActive = false;
+    let captionTimer = null;
+    let seenCaptionKeys = new Set();
+    let lastActionRows = [];
 
     const duration = () => {{
       const audioDuration = audio && audio.duration && Number.isFinite(audio.duration) ? audio.duration : 0;
@@ -720,7 +735,7 @@ def _build_realtime_audio_file_js(
       if (state) state.textContent = text;
     }};
     const setCaptionStatus = text => {{
-      if (!latestCaption) get("caption").textContent = text;
+      if (!latestCaption && !captionDisplayActive) get("caption").textContent = text;
     }};
     const escapeHtml = value => String(value ?? "").replace(/[&<>"']/g, ch => ({{
       "&": "&amp;",
@@ -733,58 +748,101 @@ def _build_realtime_audio_file_js(
       .toLowerCase()
       .replace(/_/g, " ")
       .replace(/\\b\\w/g, match => match.toUpperCase());
-    const renderActions = rows => {{
-      const target = get("actions");
-      if (!target) return;
-      const items = Array.isArray(rows) ? rows : [];
-      if (!items.length) {{
-        target.innerHTML = '<div class="rt-empty">No actions emitted yet.</div>';
+    const captionKey = row => `${{Number(row.start || 0).toFixed(2)}}|${{Number(row.end || 0).toFixed(2)}}|${{row.text || ""}}`;
+    const showNextCaption = () => {{
+      if (!captionQueue.length) {{
+        captionDisplayActive = false;
         return;
       }}
-      target.innerHTML = items.slice(-6).map(action => {{
-        const type = action.action || "ACTION";
-        const payload = action.displayPayload || {{}};
-        const time = `${{Number(action.time || 0).toFixed(2)}}s`;
-        if (type === "PIN_PRODUCT_CARD") {{
-          const product = payload.product || {{}};
-          return `
-            <div class="rt-action-card rt-action-pin">
-              <div class="rt-action-top"><div class="rt-action-type">${{escapeHtml(type)}}</div><div class="rt-action-time">${{time}}</div></div>
-              <div class="rt-action-title">${{escapeHtml(product.product_name || action.title || "Pin product card")}}</div>
-              <div class="rt-action-meta">THB ${{escapeHtml(product.discount_price || "")}} <span style="color:#667085">${{escapeHtml(product.brand || action.skus || "")}}</span></div>
-            </div>`;
-        }}
-        if (type === "SHOW_PROMO_CODE") {{
-          return `
-            <div class="rt-action-card rt-action-promo">
-              <div class="rt-action-top"><div class="rt-action-type">${{escapeHtml(type)}}</div><div class="rt-action-time">${{time}}</div></div>
-              <div class="rt-promo-badge">${{escapeHtml(payload.promo_code || "PROMO")}}</div>
-              <div class="rt-action-meta">${{escapeHtml(payload.promo_description || action.skus || "-")}}</div>
-            </div>`;
-        }}
-        if (type === "SHOW_BUNDLE_RECOMMENDATION") {{
-          return `
-            <div class="rt-action-card rt-action-bundle">
-              <div class="rt-action-top"><div class="rt-action-type">${{escapeHtml(type)}}</div><div class="rt-action-time">${{time}}</div></div>
-              <div class="rt-action-title">${{escapeHtml(action.title || "Recommended bundle")}}</div>
-              <div class="rt-bundle-row">${{escapeHtml(action.skus || "-")}}</div>
-            </div>`;
-        }}
-        if (type === "START_FLASH_SALE_COUNTDOWN") {{
-          return `
-            <div class="rt-action-card rt-action-countdown">
-              <div class="rt-action-top"><div class="rt-action-type">${{escapeHtml(type)}}</div><div class="rt-action-time">${{time}}</div></div>
-              <div class="rt-countdown-time">${{escapeHtml(payload.duration_minutes || 5)}} min</div>
-              <div class="rt-action-meta">${{escapeHtml(payload.promo_code || "Live deal")}}</div>
-            </div>`;
-        }}
+      captionDisplayActive = true;
+      const row = captionQueue.shift();
+      latestCaption = String(row.text || "");
+      if (latestCaption) get("caption").textContent = latestCaption;
+      const durationMs = Math.max(
+        1400,
+        Math.min(3600, Math.max(0.8, Number(row.end || 0) - Number(row.start || 0)) * 1000)
+      );
+      if (captionTimer) window.clearTimeout(captionTimer);
+      captionTimer = window.setTimeout(showNextCaption, durationMs);
+    }};
+    const enqueueCaptions = rows => {{
+      const items = Array.isArray(rows) ? rows : [];
+      const fresh = [];
+      for (const row of items) {{
+        if (!row || !row.text) continue;
+        const key = captionKey(row);
+        if (seenCaptionKeys.has(key)) continue;
+        seenCaptionKeys.add(key);
+        fresh.push(row);
+      }}
+      if (fresh.length) {{
+        captionQueue.push(...fresh);
+        if (!captionDisplayActive) showNextCaption();
+      }}
+    }};
+    const formatRemaining = (action, now) => {{
+      const payload = action.displayPayload || {{}};
+      const total = Number(payload.duration_seconds || (Number(payload.duration_minutes || 5) * 60));
+      const elapsed = Math.max(0, Number(now || 0) - Number(action.time || 0));
+      const remaining = Math.max(0, Math.ceil(total - elapsed));
+      const minutes = Math.floor(remaining / 60);
+      const seconds = String(remaining % 60).padStart(2, "0");
+      return `${{minutes}}:${{seconds}}`;
+    }};
+    const renderActionCard = (action, now) => {{
+      const type = action.action || "ACTION";
+      const payload = action.displayPayload || {{}};
+      const time = `${{Number(action.time || 0).toFixed(2)}}s`;
+      if (type === "PIN_PRODUCT_CARD") {{
+        const product = payload.product || {{}};
         return `
-          <div class="rt-action-card">
-            <div class="rt-action-top"><div class="rt-action-type">${{escapeHtml(type)}}</div><div class="rt-action-time">${{time}}</div></div>
-            <div class="rt-action-title">${{escapeHtml(action.title || humanActionTitle(type))}}</div>
-            <div class="rt-action-meta">${{escapeHtml(action.skus || "-")}}</div>
+          <div class="rt-action-card rt-action-pin">
+            <div class="rt-action-top"><strong>${{escapeHtml(product.product_name || action.title || "Pinned product")}}</strong><div class="rt-action-time">${{time}}</div></div>
+            <div class="rt-action-meta">THB ${{escapeHtml(product.discount_price || "")}} <span style="color:#667085">${{escapeHtml(product.brand || "")}}</span></div>
           </div>`;
-      }}).join("");
+      }}
+      if (type === "SHOW_PROMO_CODE") {{
+        return `
+          <div class="rt-action-card rt-action-promo">
+            <div class="rt-action-top"><strong>${{escapeHtml(action.title || "Promo code")}}</strong><div class="rt-action-time">${{time}}</div></div>
+            <div class="rt-promo-badge">${{escapeHtml(payload.promo_code || "PROMO")}}</div>
+            <div class="rt-action-meta">${{escapeHtml(payload.promo_description || "Live promo detected")}}</div>
+          </div>`;
+      }}
+      if (type === "SHOW_BUNDLE_RECOMMENDATION") {{
+        return `
+          <div class="rt-action-card rt-action-bundle">
+            <div class="rt-action-top"><strong>${{escapeHtml(action.title || "Recommended bundle")}}</strong><div class="rt-action-time">${{time}}</div></div>
+            <div class="rt-bundle-row">${{escapeHtml(action.skus || "-")}}</div>
+          </div>`;
+      }}
+      if (type === "START_FLASH_SALE_COUNTDOWN") {{
+        return `
+          <div class="rt-action-card rt-action-countdown">
+            <div class="rt-action-top"><strong>Flash sale countdown</strong><div class="rt-action-time">${{time}}</div></div>
+            ${{payload.promo_code ? `<div class="rt-promo-badge">${{escapeHtml(payload.promo_code)}}</div>` : `<div class="rt-action-title">${{escapeHtml(action.title || "Live deal")}}</div>`}}
+            <div class="rt-countdown-time">${{formatRemaining(action, now)}}</div>
+          </div>`;
+      }}
+      return `
+        <div class="rt-action-card">
+          <div class="rt-action-top"><strong>${{escapeHtml(action.title || humanActionTitle(type))}}</strong><div class="rt-action-time">${{time}}</div></div>
+          <div class="rt-action-meta">${{escapeHtml(action.skus || "-")}}</div>
+        </div>`;
+    }};
+    const renderActions = (rows, now = streamTime()) => {{
+      if (rows !== undefined) lastActionRows = Array.isArray(rows) ? rows : [];
+      const target = get("actions");
+      const currentTarget = get("current-action");
+      const items = lastActionRows;
+      if (!items.length) {{
+        if (target) target.innerHTML = '<div class="rt-empty">No actions emitted yet.</div>';
+        if (currentTarget) currentTarget.innerHTML = '<div class="rt-empty">Current action will appear here.</div>';
+        return;
+      }}
+      const current = items[items.length - 1];
+      if (currentTarget) currentTarget.innerHTML = renderActionCard(current, now);
+      if (target) target.innerHTML = items.slice(-6).map(action => renderActionCard(action, now)).join("");
     }};
     const updateTime = () => {{
       const total = duration();
@@ -793,6 +851,7 @@ def _build_realtime_audio_file_js(
       const progress = get("progress");
       if (time) time.textContent = `${{current.toFixed(2)}}s / ${{total ? total.toFixed(2) : "..."}}s`;
       if (progress) progress.style.width = `${{total ? Math.max(0, Math.min(100, (current / total) * 100)) : 0}}%`;
+      if (lastActionRows.length) renderActions(lastActionRows, current);
       if (playing && total && current >= total) {{
         playing = false;
         baseSeconds = total;
@@ -864,7 +923,7 @@ def _build_realtime_audio_file_js(
       ticker = null;
       if (audio) audio.pause();
       setState("paused");
-      setCaptionStatus("Waiting for live transcript...");
+      setCaptionStatus("Stream paused. Press play to continue captions.");
       setDetail("Input is paused. ASR waits until stream time advances again.");
       updateTime();
       setToggleButton();
@@ -932,9 +991,10 @@ def _build_realtime_audio_file_js(
           readyToStart = true;
           setToggleButton();
         }}
-        if (payload.latestCaption) {{
-          latestCaption = String(payload.latestCaption);
-          get("caption").textContent = latestCaption;
+        if (payload.captionRows) {{
+          enqueueCaptions(payload.captionRows);
+        }} else if (payload.latestCaption) {{
+          enqueueCaptions([{{text: payload.latestCaption, start: 0, end: 1.5}}]);
         }}
         const captionCount = get("caption-count");
         if (captionCount && payload.captionCount !== undefined) {{
@@ -944,7 +1004,7 @@ def _build_realtime_audio_file_js(
         if (actionCount && payload.actionCount !== undefined) {{
           actionCount.textContent = `${{payload.actionCount}} actions`;
         }}
-        if (payload.actionRows) renderActions(payload.actionRows);
+        if (payload.actionRows) renderActions(payload.actionRows, streamTime());
         const detail = [];
         if (payload.status) detail.push(payload.status);
         if (payload.chunkStart !== undefined && payload.chunkEnd !== undefined) {{
@@ -958,7 +1018,7 @@ def _build_realtime_audio_file_js(
     }};
     if (audio) audio.addEventListener("loadedmetadata", updateTime);
     setState("ready");
-    setDetail("Loading ASR before stream controls are enabled.");
+    setDetail("Preparing ASR. Press play when the control is enabled.");
     updateTime();
     setToggleButton();
   }};

@@ -139,7 +139,7 @@ class FullDemoPlaybackGate:
         self._duration = max((window.end for window in self.windows), default=0.0)
         self._state = "ready"
         self._detail = "press_start"
-        self._latest_caption = "Waiting for live transcript..."
+        self._latest_caption = "Ready to start. Press play to stream audio into ASR."
         self._caption_count = 0
         self._action_rows: List[Dict[str, Any]] = []
         self._ticker_started = False
@@ -388,7 +388,7 @@ class FullDemoPlaybackGate:
     def _action_rail_html(self) -> str:
         return (
             '<div class="lc-action-rail">'
-            '<div class="lc-panel-title">Live ASR + action preview</div>'
+            '<div class="lc-panel-title">Action history</div>'
             '<div class="lc-stats">'
             f"<span>{self._caption_count} captions</span>"
             f"<span>{len(self._action_rows)} actions</span>"
@@ -446,7 +446,7 @@ class FullDemoMicGate:
         self._detail = "Press Start to open the browser mic."
         self.widget_id = f"full-demo-mic-{uuid.uuid4().hex}"
         self.caption_id = f"{self.widget_id}-caption"
-        self._latest_caption = "Waiting for live transcript..."
+        self._latest_caption = "Ready to start. Press the mic button to stream speech into ASR."
         self._caption_count = 0
         self._action_rows: List[Dict[str, Any]] = []
         self.status_html = widgets.HTML()
@@ -589,7 +589,7 @@ class FullDemoMicGate:
         <div class="lc-host-head"></div>
         <div class="lc-host-body"></div>
       </div>
-      <div class="lc-video-caption" id="{caption_id}">Waiting for live transcript...</div>
+      <div class="lc-video-caption" id="{caption_id}">Ready to start. Press the mic button to stream speech into ASR.</div>
     </div>
 </div>
 """.format(caption_id=html.escape(self.caption_id))
@@ -613,7 +613,7 @@ class FullDemoMicGate:
     def _action_rail_html(self) -> str:
         return (
             '<div class="lc-action-rail">'
-            '<div class="lc-panel-title">Live ASR + action preview</div>'
+            '<div class="lc-panel-title">Action history</div>'
             '<div class="lc-stats">'
             f"<span>{self._caption_count} captions</span>"
             f"<span>{len(self._action_rows)} actions</span>"
@@ -1181,7 +1181,7 @@ def _display_full_demo_ui_legacy(repo_root: Path = REPO_ROOT) -> None:
                                 captions=captions,
                                 actions=actions,
                                 mode_label="Recording mode",
-                                title="Batch ASR + action preview",
+                                title="Action history",
                                 show_audio_controls=True,
                             )
                         )
@@ -1545,7 +1545,7 @@ def display_full_demo_ui(repo_root: Path = REPO_ROOT) -> None:
                             captions=captions,
                             actions=actions,
                             mode_label="Recording",
-                            title="ASR + action preview",
+                            title="Action history",
                             show_audio_controls=True,
                             catalog=session.catalog,
                             product_images=session.product_images,
@@ -1630,11 +1630,11 @@ def display_catalog_manager_ui(repo_root: Path = REPO_ROOT) -> None:
         layout=widgets.Layout(width="150px", height="42px"),
     )
     add_button = widgets.Button(
-        description="",
+        description="+",
         icon="plus",
         button_style="success",
         tooltip="Add item",
-        layout=widgets.Layout(width="44px", height="40px"),
+        layout=widgets.Layout(width="54px", height="40px"),
     )
     list_output = widgets.Output()
     form_box = widgets.VBox(layout=widgets.Layout(width="100%"))
@@ -2124,7 +2124,6 @@ def build_live_ready_scene_html(
     <div class="lc-source-detail">{source_note}</div>
     <div class="lc-live-actions">
       <div class="lc-action-card">
-        <div class="lc-action-type">WAITING</div>
         <strong>Stream is ready</strong>
         <div class="lc-muted">Start keeps this showcase active while ASR/action chunks are processed.</div>
       </div>
@@ -2145,10 +2144,8 @@ def _live_action_cards_html(action_rows: Sequence[Dict[str, Any]]) -> str:
         timestamp = html.escape(str(action.get("time") or "0.00"))
         cards.append(
             '<div class="lc-action-card">'
-            f'<div class="lc-action-type">{action_type}</div>'
-            f"<strong>{title}</strong>"
+            f'<div class="lc-action-top"><strong>{title}</strong><small>{timestamp}s</small></div>'
             f"<div>{skus}</div>"
-            f"<small>{timestamp}s</small>"
             "</div>"
         )
     return "".join(cards)
@@ -2240,6 +2237,9 @@ def build_viewer_scene_html(
       </div>
       <div class="lc-video-caption" data-role="caption">Waiting for playback...</div>
     </div>
+    <div class="lc-current-action" data-role="current-action">
+      <div class="lc-muted">Current action will appear here as playback reaches it.</div>
+    </div>
     {audio_html}
   </div>
   <div class="lc-action-rail">
@@ -2260,6 +2260,7 @@ def build_viewer_scene_html(
   const audio = root.querySelector("audio");
   const captionEl = root.querySelector('[data-role="caption"]');
   const actionsEl = root.querySelector('[data-role="actions"]');
+  const currentActionEl = root.querySelector('[data-role="current-action"]');
   const escapeHtml = value => String(value ?? "").replace(/[&<>"']/g, ch => ({{
     "&": "&amp;",
     "<": "&lt;",
@@ -2283,7 +2284,16 @@ def build_viewer_scene_html(
         </div>
       </div>`;
   }};
-  const renderAction = (action) => {{
+  const formatRemaining = (action, now) => {{
+    const payload = action.display_payload || {{}};
+    const total = Number(payload.duration_seconds || (Number(payload.duration_minutes || 5) * 60));
+    const elapsed = Math.max(0, Number(now || 0) - Number(action.timestamp || 0));
+    const remaining = Math.max(0, Math.ceil(total - elapsed));
+    const minutes = Math.floor(remaining / 60);
+    const seconds = String(remaining % 60).padStart(2, "0");
+    return `${{minutes}}:${{seconds}}`;
+  }};
+  const renderAction = (action, now = 0, isCurrent = false) => {{
     const payload = action.display_payload || {{}};
     const actionType = action.action_type || "ACTION";
     const skus = action.skus || [];
@@ -2291,38 +2301,38 @@ def build_viewer_scene_html(
     if (actionType === "PIN_PRODUCT_CARD") {{
       const sku = skus[0];
       return `<div class="lc-action-card lc-action-pin">
-        <div class="lc-action-top"><span>${{escapeHtml(actionType)}}</span><small>${{time}}s</small></div>
+        <div class="lc-action-top"><strong>${{escapeHtml(payload.title || "Pinned product")}}</strong><small>${{time}}s</small></div>
         ${{productLine(sku)}}
       </div>`;
     }}
     if (actionType === "SHOW_PROMO_CODE") {{
       return `<div class="lc-action-card lc-action-promo">
-        <div class="lc-action-top"><span>${{escapeHtml(actionType)}}</span><small>${{time}}s</small></div>
+        <div class="lc-action-top"><strong>${{escapeHtml(payload.title || "Promo code")}}</strong><small>${{time}}s</small></div>
         <div class="lc-promo-badge">${{escapeHtml(payload.promo_code || "PROMO")}}</div>
         <strong>${{escapeHtml(payload.promo_description || payload.title || "Promo code detected")}}</strong>
         <div class="lc-mini-product-row">${{skus.map(productVisual).join("")}}</div>
-        <div class="lc-muted">${{skus.map(escapeHtml).join(" + ")}}</div>
       </div>`;
     }}
     if (actionType === "SHOW_BUNDLE_RECOMMENDATION") {{
       return `<div class="lc-action-card lc-action-bundle">
-        <div class="lc-action-top"><span>${{escapeHtml(actionType)}}</span><small>${{time}}s</small></div>
-        <strong>${{escapeHtml(payload.title || "Recommended bundle")}}</strong>
+        <div class="lc-action-top"><strong>${{escapeHtml(payload.title || "Recommended bundle")}}</strong><small>${{time}}s</small></div>
         <div class="lc-bundle-row">${{skus.map(productVisual).join('<div class="lc-bundle-plus">+</div>')}}</div>
         <div class="lc-muted">${{escapeHtml(payload.reason || skus.join(" + "))}}</div>
       </div>`;
     }}
     if (actionType === "START_FLASH_SALE_COUNTDOWN") {{
+      const countdown = formatRemaining(action, now);
+      const attachedProduct = skus.length ? productLine(skus[0]) : "";
+      const promo = payload.promo_code ? `<div class="lc-promo-badge">${{escapeHtml(payload.promo_code)}}</div>` : "";
       return `<div class="lc-action-card lc-action-countdown">
-        <div class="lc-action-top"><span>${{escapeHtml(actionType)}}</span><small>${{time}}s</small></div>
-        <div class="lc-countdown-time">${{escapeHtml(payload.duration_minutes || 5)}} min</div>
-        <strong>${{escapeHtml(payload.promo_code || "Live deal")}}</strong>
+        <div class="lc-action-top"><strong>Flash sale countdown</strong><small>${{time}}s</small></div>
+        ${{promo || attachedProduct}}
+        <div class="lc-countdown-time" data-countdown-at="${{escapeHtml(time)}}">${{countdown}}</div>
         <div class="lc-mini-product-row">${{skus.map(productVisual).join("")}}</div>
-        <div class="lc-muted">Flash sale window started.</div>
       </div>`;
     }}
     return `<div class="lc-action-card">
-      <div class="lc-action-top"><span>${{escapeHtml(actionType)}}</span><small>${{time}}s</small></div>
+      <div class="lc-action-top"><strong>${{escapeHtml(payload.title || "Action")}}</strong><small>${{time}}s</small></div>
       <strong>${{escapeHtml(payload.title || actionType)}}</strong>
       <div class="lc-muted">${{skus.map(escapeHtml).join(" + ")}}</div>
     </div>`;
@@ -2332,7 +2342,15 @@ def build_viewer_scene_html(
     const current = captions.find(item => t >= item.start && t <= item.end) || captions.filter(item => item.end <= t).slice(-1)[0];
     captionEl.textContent = current ? current.text : "Waiting for caption...";
     const visible = actions.filter(item => item.timestamp <= t);
-    actionsEl.innerHTML = (visible.length ? visible : actions.slice(0, 3)).slice(-6).map(renderAction).join("");
+    const currentAction = visible.slice(-1)[0];
+    if (currentActionEl) {{
+      currentActionEl.innerHTML = currentAction
+        ? renderAction(currentAction, t, true)
+        : '<div class="lc-muted">Current action will appear here as playback reaches it.</div>';
+    }}
+    actionsEl.innerHTML = visible.length
+      ? visible.slice(-6).map(item => renderAction(item, t)).join("")
+      : '<div class="lc-action-card"><div class="lc-muted">No actions emitted yet.</div></div>';
   }};
   if (audio) {{
     audio.addEventListener("timeupdate", render);
@@ -2860,7 +2878,6 @@ def _style_block() -> str:
 .lc-action-card,.lc-product-card,.lc-promo-card{border:1px solid #d0d5dd;border-radius:8px;padding:11px;background:#fff;color:#111827;box-shadow:0 2px 8px rgba(16,24,40,.04)}
 .lc-action-card{display:flex;flex-direction:column;gap:8px}
 .lc-action-top{display:flex;justify-content:space-between;gap:8px;align-items:center}
-.lc-action-top span,.lc-action-type{font-size:11px;color:#b42318;font-weight:900;letter-spacing:.04em}
 .lc-action-top small{font-size:11px;color:#667085}
 .lc-action-pin{border-color:#bfdbfe;background:#eff6ff}
 .lc-action-promo{border-color:#fed7aa;background:#fff7ed}
@@ -2881,14 +2898,14 @@ def _style_block() -> str:
 .lc-bundle-plus{font-weight:900;color:#15803d}
 .lc-countdown-time{font-size:34px;line-height:1;font-weight:900;color:#b42318}
 .lc-catalog-grid{display:grid;grid-template-columns:1.35fr .9fr;gap:14px}
-.lc-catalog-shell{border:1px solid #374151;border-radius:8px;background:#111827;color:#f9fafb;padding:14px;box-shadow:0 10px 28px rgba(0,0,0,.22)}
-.lc-catalog-shell .lc-panel-title{color:#f9fafb}
-.lc-catalog-shell .lc-muted{color:#cbd5e1}
+.lc-catalog-shell{border:1px solid #d0d5dd;border-radius:8px;background:#fff;color:#111827;padding:14px;box-shadow:0 8px 24px rgba(16,24,40,.06)}
+.lc-catalog-shell .lc-panel-title{color:#111827}
+.lc-catalog-shell .lc-muted{color:#667085}
 .lc-catalog-heading{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:12px}
-.lc-catalog-heading span{color:#cbd5e1;font-size:12px;background:#1f2937;border-radius:999px;padding:5px 10px}
-.lc-catalog-shell .lc-product-card,.lc-catalog-shell .lc-promo-card{background:#1f2937;border-color:#374151;color:#f9fafb;box-shadow:none}
-.lc-catalog-shell .lc-product-card strong,.lc-catalog-shell .lc-promo-card strong,.lc-catalog-shell .lc-price{color:#f9fafb}
-.lc-catalog-shell .lc-tags span{background:#374151;color:#e5e7eb}
+.lc-catalog-heading span{color:#344054;font-size:12px;background:#f2f4f7;border-radius:999px;padding:5px 10px}
+.lc-catalog-shell .lc-product-card,.lc-catalog-shell .lc-promo-card{background:#fff;border-color:#d0d5dd;color:#111827;box-shadow:0 2px 8px rgba(16,24,40,.04)}
+.lc-catalog-shell .lc-product-card strong,.lc-catalog-shell .lc-promo-card strong,.lc-catalog-shell .lc-price{color:#111827}
+.lc-catalog-shell .lc-tags span{background:#f2f4f7;color:#344054}
 .lc-card-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:10px}
 .lc-product-card{display:grid;grid-template-columns:64px minmax(0,1fr);gap:12px}
 .lc-product-card strong,.lc-promo-card strong{color:#111827}
@@ -2902,7 +2919,7 @@ def _style_block() -> str:
 .lc-tags span{background:#f2f4f7;border-radius:999px;padding:2px 7px;font-size:11px;color:#344054}
 .lc-promo-code{font-weight:900;color:#b42318;font-size:15px;margin-bottom:5px}
 .lc-form-title{font-weight:900;font-size:16px;color:#111827;margin:8px 0}
-.lc-catalog-shell .lc-product-card strong,.lc-catalog-shell .lc-promo-card strong,.lc-catalog-shell .lc-price{color:#f9fafb}
+.lc-catalog-shell .lc-product-card strong,.lc-catalog-shell .lc-promo-card strong,.lc-catalog-shell .lc-price{color:#111827}
 @media (max-width: 960px){.lc-viewer,.lc-catalog-grid{grid-template-columns:1fr}.lc-header{flex-direction:column;gap:10px}}
 </style>
 """

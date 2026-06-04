@@ -1241,6 +1241,7 @@ def install_colab_live_mic_debug_panel(
                 #live-commerce-mic-debug .lm-caption{position:absolute;left:18px;right:18px;bottom:18px;background:rgba(17,24,39,.88);color:#fff;border-radius:8px;padding:13px;font-size:16px;line-height:1.4}
                 #live-commerce-mic-debug .lm-title{font-weight:800;font-size:24px;line-height:1.16;color:#111827;margin-bottom:10px}
                 #live-commerce-mic-debug .lm-muted{color:#667085;font-size:12px;line-height:1.4}
+                #live-commerce-mic-debug .lm-current-action{margin-top:10px}
                 #live-commerce-mic-debug .lm-bottom{display:grid;grid-template-columns:48px minmax(0,1fr);gap:10px;align-items:center;margin-top:10px}
                 #live-commerce-mic-debug button{border:0;border-radius:8px;width:48px;height:42px;font-size:18px;font-weight:800;cursor:pointer;display:inline-flex;align-items:center;justify-content:center}
                 #live-commerce-mic-debug #mic-debug-start{background:#b42318;color:#fff}
@@ -1250,11 +1251,19 @@ def install_colab_live_mic_debug_panel(
                 #live-commerce-mic-debug .lm-stats{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}
                 #live-commerce-mic-debug .lm-stats span{background:#f2f4f7;border-radius:999px;padding:5px 10px;font-size:13px;color:#344054}
                 #live-commerce-mic-debug .lm-actions{display:flex;flex-direction:column;gap:10px}
-                #live-commerce-mic-debug .lm-action-card{border:1px solid #d0d5dd;border-radius:8px;padding:12px;background:#fff;color:#111827;box-shadow:0 2px 8px rgba(16,24,40,.04)}
-                #live-commerce-mic-debug .lm-action-type{font-size:11px;color:#b42318;font-weight:900;margin-bottom:5px;letter-spacing:.04em}
+                #live-commerce-mic-debug .lm-action-card{border:1px solid #d0d5dd;border-radius:8px;padding:12px;background:#fff;color:#111827;box-shadow:0 2px 8px rgba(16,24,40,.04);display:flex;flex-direction:column;gap:7px}
+                #live-commerce-mic-debug .lm-action-pin{border-color:#bfdbfe;background:#eff6ff}
+                #live-commerce-mic-debug .lm-action-promo{border-color:#fed7aa;background:#fff7ed}
+                #live-commerce-mic-debug .lm-action-bundle{border-color:#bbf7d0;background:#f0fdf4}
+                #live-commerce-mic-debug .lm-action-countdown{border-color:#fecaca;background:#fef2f2}
+                #live-commerce-mic-debug .lm-action-top{display:flex;justify-content:space-between;align-items:center;gap:8px}
+                #live-commerce-mic-debug .lm-action-top strong{font-size:14px;color:#111827}
                 #live-commerce-mic-debug .lm-action-title{font-size:16px;font-weight:800;margin-bottom:4px}
                 #live-commerce-mic-debug .lm-action-meta{font-size:14px;color:#111827;line-height:1.35}
                 #live-commerce-mic-debug .lm-action-time{font-size:12px;color:#667085;margin-top:6px}
+                #live-commerce-mic-debug .lm-promo-badge{align-self:flex-start;border-radius:8px;background:#b42318;color:#fff;padding:7px 10px;font-size:18px;font-weight:900;letter-spacing:.04em}
+                #live-commerce-mic-debug .lm-countdown-time{font-size:30px;line-height:1;font-weight:900;color:#b42318}
+                #live-commerce-mic-debug .lm-bundle-row{font-weight:800;color:#166534}
                 #live-commerce-mic-debug .lm-empty{border:1px solid #d0d5dd;border-radius:8px;padding:12px;color:#667085;background:#fff}
                 @media (max-width: 900px){#live-commerce-mic-debug .lm-grid{grid-template-columns:1fr}}
               </style>
@@ -1262,15 +1271,16 @@ def install_colab_live_mic_debug_panel(
                 <div>
                   <div class="lm-video">
                     <div class="lm-host"><div class="lm-head"></div><div class="lm-body"></div></div>
-                    <div class="lm-caption" id="mic-debug-caption">Waiting for live transcript...</div>
+                    <div class="lm-caption" id="mic-debug-caption">Ready to start. Press the mic button to stream speech into ASR.</div>
                   </div>
+                  <div class="lm-current-action" id="mic-debug-current-action"><div class="lm-empty">Current action will appear here.</div></div>
                   <div class="lm-bottom">
                     <button id="mic-debug-start" disabled title="Enable mic input" aria-label="Enable mic input">&#127908;</button>
                     <div class="lm-meter"><div id="mic-debug-meter"></div></div>
                   </div>
                 </div>
                 <div>
-                  <div class="lm-title">Live ASR + action preview</div>
+                  <div class="lm-title">Action history</div>
                   <div class="lm-stats">
                     <span id="mic-debug-caption-count">0 captions</span>
                     <span id="mic-debug-action-count">0 actions</span>
@@ -1309,23 +1319,114 @@ def install_colab_live_mic_debug_panel(
                 .toLowerCase()
                 .replace(/_/g, ' ')
                 .replace(/\b\w/g, match => match.toUpperCase());
-              const renderActions = (root, rows) => {
-                const target = root.querySelector('#mic-debug-actions');
-                if (!target) return;
-                const items = Array.isArray(rows) ? rows : [];
-                if (!items.length) {
-                  target.innerHTML = '<div class="lm-empty">No actions emitted yet.</div>';
+              let captionQueue = [];
+              let captionDisplayActive = false;
+              let captionTimer = null;
+              let seenCaptionKeys = new Set();
+              let lastActionRows = [];
+              const actionSeenAt = new Map();
+              const captionKey = row => `${Number(row.start || 0).toFixed(2)}|${Number(row.end || 0).toFixed(2)}|${row.text || ''}`;
+              const showNextCaption = (root) => {
+                if (!captionQueue.length) {
+                  captionDisplayActive = false;
                   return;
                 }
-                target.innerHTML = items.slice(-6).map(action => `
-                  <div class="lm-action-card">
-                    <div class="lm-action-type">${escapeHtml(action.action || 'ACTION')}</div>
-                    <div class="lm-action-title">${escapeHtml(action.title || humanActionTitle(action.action))}</div>
-                    <div class="lm-action-meta">${escapeHtml(action.skus || '-')}</div>
-                    <div class="lm-action-time">${escapeHtml(Number(action.time || 0).toFixed(2))}s</div>
-                  </div>
-                `).join('');
+                captionDisplayActive = true;
+                const row = captionQueue.shift();
+                const caption = root.querySelector('#mic-debug-caption');
+                if (caption && row.text) caption.textContent = row.text;
+                const durationMs = Math.max(
+                  1400,
+                  Math.min(3600, Math.max(0.8, Number(row.end || 0) - Number(row.start || 0)) * 1000)
+                );
+                if (captionTimer) window.clearTimeout(captionTimer);
+                captionTimer = window.setTimeout(() => showNextCaption(root), durationMs);
               };
+              const enqueueCaptions = (root, rows) => {
+                const items = Array.isArray(rows) ? rows : [];
+                const fresh = [];
+                for (const row of items) {
+                  if (!row || !row.text) continue;
+                  const key = captionKey(row);
+                  if (seenCaptionKeys.has(key)) continue;
+                  seenCaptionKeys.add(key);
+                  fresh.push(row);
+                }
+                if (fresh.length) {
+                  captionQueue.push(...fresh);
+                  if (!captionDisplayActive) showNextCaption(root);
+                }
+              };
+              const formatRemaining = action => {
+                const key = `${action.action || ''}|${action.time || ''}|${action.skus || ''}`;
+                if (!actionSeenAt.has(key)) actionSeenAt.set(key, Date.now());
+                const payload = action.displayPayload || {};
+                const total = Number(payload.duration_seconds || (Number(payload.duration_minutes || 5) * 60));
+                const elapsed = Math.max(0, (Date.now() - actionSeenAt.get(key)) / 1000);
+                const remaining = Math.max(0, Math.ceil(total - elapsed));
+                const minutes = Math.floor(remaining / 60);
+                const seconds = String(remaining % 60).padStart(2, '0');
+                return `${minutes}:${seconds}`;
+              };
+              const renderActionCard = (action) => {
+                const type = action.action || 'ACTION';
+                const payload = action.displayPayload || {};
+                const time = `${Number(action.time || 0).toFixed(2)}s`;
+                if (type === 'PIN_PRODUCT_CARD') {
+                  const product = payload.product || {};
+                  return `
+                    <div class="lm-action-card lm-action-pin">
+                      <div class="lm-action-top"><strong>${escapeHtml(product.product_name || action.title || 'Pinned product')}</strong><div class="lm-action-time">${time}</div></div>
+                      <div class="lm-action-meta">THB ${escapeHtml(product.discount_price || '')} <span style="color:#667085">${escapeHtml(product.brand || '')}</span></div>
+                    </div>`;
+                }
+                if (type === 'SHOW_PROMO_CODE') {
+                  return `
+                    <div class="lm-action-card lm-action-promo">
+                      <div class="lm-action-top"><strong>${escapeHtml(action.title || 'Promo code')}</strong><div class="lm-action-time">${time}</div></div>
+                      <div class="lm-promo-badge">${escapeHtml(payload.promo_code || 'PROMO')}</div>
+                      <div class="lm-action-meta">${escapeHtml(payload.promo_description || 'Live promo detected')}</div>
+                    </div>`;
+                }
+                if (type === 'SHOW_BUNDLE_RECOMMENDATION') {
+                  return `
+                    <div class="lm-action-card lm-action-bundle">
+                      <div class="lm-action-top"><strong>${escapeHtml(action.title || 'Recommended bundle')}</strong><div class="lm-action-time">${time}</div></div>
+                      <div class="lm-bundle-row">${escapeHtml(action.skus || '-')}</div>
+                    </div>`;
+                }
+                if (type === 'START_FLASH_SALE_COUNTDOWN') {
+                  return `
+                    <div class="lm-action-card lm-action-countdown">
+                      <div class="lm-action-top"><strong>Flash sale countdown</strong><div class="lm-action-time">${time}</div></div>
+                      ${payload.promo_code ? `<div class="lm-promo-badge">${escapeHtml(payload.promo_code)}</div>` : `<div class="lm-action-title">${escapeHtml(action.title || 'Live deal')}</div>`}
+                      <div class="lm-countdown-time">${formatRemaining(action)}</div>
+                    </div>`;
+                }
+                return `
+                  <div class="lm-action-card">
+                    <div class="lm-action-top"><strong>${escapeHtml(action.title || humanActionTitle(type))}</strong><div class="lm-action-time">${time}</div></div>
+                    <div class="lm-action-meta">${escapeHtml(action.skus || '-')}</div>
+                  </div>`;
+              };
+              const renderActions = (root, rows) => {
+                const target = root.querySelector('#mic-debug-actions');
+                const currentTarget = root.querySelector('#mic-debug-current-action');
+                if (rows !== undefined) lastActionRows = Array.isArray(rows) ? rows : [];
+                const items = lastActionRows;
+                if (!items.length) {
+                  if (target) target.innerHTML = '<div class="lm-empty">No actions emitted yet.</div>';
+                  if (currentTarget) currentTarget.innerHTML = '<div class="lm-empty">Current action will appear here.</div>';
+                  return;
+                }
+                const current = items[items.length - 1];
+                if (currentTarget) currentTarget.innerHTML = renderActionCard(current);
+                if (target) target.innerHTML = items.slice(-6).map(renderActionCard).join('');
+              };
+              window.setInterval(() => {
+                const root = latestRoot();
+                if (root && lastActionRows.length) renderActions(root, lastActionRows);
+              }, 1000);
               const bindControls = () => {
                 const root = latestRoot();
                 if (!root) return;
@@ -1439,10 +1540,12 @@ def install_colab_live_mic_debug_panel(
                 get('mic-debug-meter').style.background = isSpeech ? '#12b76a' : '#f04438';
                 const caption = get('mic-debug-caption');
                 if (caption) {
-                  if (payload.latestCaption) {
-                    caption.textContent = payload.latestCaption;
+                  if (payload.captionRows) {
+                    enqueueCaptions(root, payload.captionRows);
+                  } else if (payload.latestCaption) {
+                    enqueueCaptions(root, [{text: payload.latestCaption, start: 0, end: 1.5}]);
                   } else if (payload.state === 'ready') {
-                    caption.textContent = 'Waiting for live transcript...';
+                    caption.textContent = 'Ready to start. Press the mic button to stream speech into ASR.';
                   } else if (payload.state === 'loading_asr') {
                     caption.textContent = 'Preparing ASR model...';
                   }
@@ -1515,6 +1618,7 @@ def _display_live_state(
             "action": action.action_type,
             "title": action.display_payload.get("title", action.action_type),
             "skus": " + ".join(action.skus),
+            "displayPayload": action.display_payload,
         }
         for action in actions[-6:]
     ]
@@ -1525,6 +1629,14 @@ def _display_live_state(
             "state": state_label.lower().replace(" ", "_"),
             "status": "live_result_update",
             "latestCaption": segments[-1].text if segments else "",
+            "captionRows": [
+                {
+                    "start": round(segment.start, 3),
+                    "end": round(segment.end, 3),
+                    "text": segment.text,
+                }
+                for segment in segments[-12:]
+            ],
             "captionCount": len(segments),
             "actionCount": len(actions),
             "actionRows": action_rows,
