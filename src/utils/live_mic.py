@@ -65,6 +65,23 @@ class BrowserMicChunkSource:
         self.error: Optional[str] = None
 
     def install(self) -> None:
+        self.install_recorder()
+        install_colab_live_mic_debug_panel(
+            config=self.config,
+            callbacks=self.callbacks,
+        )
+
+    @property
+    def callbacks(self) -> Dict[str, str]:
+        return {
+            "chunk": self.chunk_callback,
+            "done": self.done_callback,
+            "error": self.error_callback,
+            "start": self.start_callback,
+            "stop": self.stop_callback,
+        }
+
+    def install_recorder(self) -> None:
         from google.colab import output  # type: ignore
 
         output.register_callback(self.chunk_callback, self._handle_chunk)
@@ -72,16 +89,34 @@ class BrowserMicChunkSource:
         output.register_callback(self.error_callback, self._handle_error)
         output.register_callback(self.start_callback, self._handle_start)
         output.register_callback(self.stop_callback, self._handle_stop)
-        install_colab_live_mic_debug_panel(
-            config=self.config,
-            callbacks={
-                "chunk": self.chunk_callback,
-                "done": self.done_callback,
-                "error": self.error_callback,
-                "start": self.start_callback,
-                "stop": self.stop_callback,
-            },
-        )
+        _install_colab_mic_recorder()
+
+    def start(self) -> None:
+        self._handle_start()
+        try:
+            from google.colab import output  # type: ignore
+
+            max_milliseconds = max(500, int(float(self.config.chunk_seconds) * 1000))
+            min_milliseconds = max(200, int(float(self.config.min_chunk_seconds) * 1000))
+            silence_milliseconds = max(100, int(float(self.config.pause_seconds) * 1000))
+            max_chunks_js = (
+                "null"
+                if self.config.max_chunks is None
+                else str(max(1, int(self.config.max_chunks)))
+            )
+            output.eval_js(
+                "window.liveCommerceMic.startRequested = true; "
+                "window.liveCommerceMic.stopRequested = false; "
+                "window.liveCommerceMic.startBufferedRecording("
+                f"{max_milliseconds}, {min_milliseconds}, "
+                f"{silence_milliseconds}, {float(self.config.silence_threshold)}, "
+                f"{max_chunks_js}, {max(1, int(self.config.max_queue_chunks))}, "
+                f"{json.dumps(self.chunk_callback)}, "
+                f"{json.dumps(self.done_callback)}, "
+                f"{json.dumps(self.error_callback)})"
+            )
+        except Exception as exc:
+            self._handle_error({"error": str(exc)})
 
     def _handle_start(self, *_args: Any) -> Dict[str, Any]:
         self._started.set()

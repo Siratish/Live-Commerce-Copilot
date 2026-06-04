@@ -8,6 +8,8 @@ import html
 import json
 import mimetypes
 import threading
+import time
+import uuid
 
 from src.ai.captioning import (
     CaptionResult,
@@ -28,7 +30,6 @@ from src.utils.live_mic import (
     run_colab_live_mic_demo,
 )
 from src.utils.realtime_audio_file import (
-    BrowserAudioPlaybackGate,
     RealtimeAudioFileDemoConfig,
     run_realtime_audio_file_demo,
 )
@@ -89,6 +90,272 @@ class FullDemoSession:
         ]
         self.promotions.append(promotion)
         self.save_catalog_files()
+
+
+class FullDemoPlaybackGate:
+    """ipywidgets-controlled playback gate for the full notebook UI."""
+
+    def __init__(
+        self,
+        widgets: Any,
+        audio_path: Path,
+        windows: Sequence[Any],
+        source_label: str,
+        poll_seconds: float = 0.25,
+    ) -> None:
+        self.widgets = widgets
+        self.audio_path = audio_path
+        self.windows = list(windows)
+        self.source_label = source_label
+        self.poll_seconds = poll_seconds
+        self.widget_id = f"full-demo-audio-{uuid.uuid4().hex}"
+        self._started = threading.Event()
+        self._stopped = threading.Event()
+        self._started_at: Optional[float] = None
+        self._duration = max((window.end for window in self.windows), default=0.0)
+        self.status_html = widgets.HTML()
+        self.detail_html = widgets.HTML()
+        self.start_button = widgets.Button(
+            description="Start / Continue",
+            icon="play",
+            button_style="danger",
+            layout=widgets.Layout(width="170px", height="42px"),
+        )
+        self.stop_button = widgets.Button(
+            description="Stop input",
+            icon="stop",
+            layout=widgets.Layout(width="140px", height="42px"),
+        )
+        self.stop_button.disabled = False
+        self.start_button.on_click(lambda _button: self.start())
+        self.stop_button.on_click(lambda _button: self.stop())
+        self.ui = widgets.VBox(
+            [
+                widgets.HTML(self._showcase_html()),
+                widgets.HBox(
+                    [self.start_button, self.stop_button],
+                    layout=widgets.Layout(gap="8px", margin="10px 0 0 0"),
+                ),
+                self.status_html,
+                self.detail_html,
+            ],
+            layout=widgets.Layout(width="100%"),
+        )
+        self.publish(
+            {
+                "state": "ready",
+                "status": "press_start",
+                "totalChunks": len(self.windows),
+                "processedChunks": 0,
+                "queueDepth": 0,
+            }
+        )
+
+    def install(self) -> None:
+        return
+
+    def start(self) -> None:
+        if self._stopped.is_set():
+            return
+        if self._started_at is None:
+            self._started_at = time.monotonic()
+        self._started.set()
+        self.start_button.disabled = True
+        self.stop_button.disabled = False
+        self.publish({"state": "playing", "status": "stream_started"})
+        self._eval_audio_js("play")
+
+    def stop(self) -> None:
+        self._stopped.set()
+        self._started.set()
+        self.start_button.disabled = True
+        self.stop_button.disabled = True
+        self.publish({"state": "stopped", "status": "input_closed"})
+        self._eval_audio_js("pause")
+
+    def wait_for_start(self) -> Dict[str, Any]:
+        self._started.wait()
+        return self.status()
+
+    def wait_until(self, target_seconds: float) -> Dict[str, Any]:
+        if self._started_at is None:
+            self.wait_for_start()
+        assert self._started_at is not None
+        while not self._stopped.is_set():
+            current = time.monotonic() - self._started_at
+            if current >= float(target_seconds):
+                return self.status()
+            time.sleep(min(self.poll_seconds, max(0.01, float(target_seconds) - current)))
+        return self.status()
+
+    def status(self) -> Dict[str, Any]:
+        current = 0.0
+        if self._started_at is not None:
+            current = max(0.0, time.monotonic() - self._started_at)
+        current = min(current, self._duration) if self._duration else current
+        return {
+            "currentTime": current,
+            "duration": self._duration,
+            "paused": self._started_at is None or self._stopped.is_set(),
+            "ended": bool(self._duration and current >= self._duration),
+            "stopped": self._stopped.is_set(),
+        }
+
+    def publish(self, payload: Dict[str, Any]) -> None:
+        status = self.status()
+        state = str(payload.get("state") or "waiting")
+        detail_parts = [str(payload.get("status") or "waiting")]
+        if payload.get("chunkIndex"):
+            detail_parts.append(
+                f"chunk {payload.get('chunkIndex')} / {payload.get('totalChunks', '?')}"
+            )
+        if payload.get("chunkStart") is not None and payload.get("chunkEnd") is not None:
+            detail_parts.append(
+                f"{float(payload['chunkStart']):.2f}-{float(payload['chunkEnd']):.2f}s"
+            )
+        if payload.get("captionCount") is not None:
+            detail_parts.append(f"{payload['captionCount']} captions")
+        if payload.get("actionCount") is not None:
+            detail_parts.append(f"{payload['actionCount']} actions")
+        self.status_html.value = (
+            '<div class="lc-selected-summary">'
+            f"<strong>{html.escape(state)}</strong> · "
+            f"{status['currentTime']:.2f}s / {self._duration:.2f}s"
+            "</div>"
+        )
+        self.detail_html.value = (
+            '<div class="lc-source-detail">'
+            + html.escape(" | ".join(detail_parts))
+            + "</div>"
+        )
+
+    def _showcase_html(self) -> str:
+        return f"""
+<div class="lc-viewer">
+  <div class="lc-video">
+    <audio id="{self.widget_id}" preload="metadata" src="{_audio_data_uri(self.audio_path)}" style="display:none;"></audio>
+    <div class="lc-video-art">
+      <div class="lc-video-badge">Live</div>
+      <div class="lc-host-frame">
+        <div class="lc-host-head"></div>
+        <div class="lc-host-body"></div>
+      </div>
+      <div class="lc-video-caption">Press Start to stream audio into ASR.</div>
+    </div>
+  </div>
+  <div class="lc-action-rail">
+    <div class="lc-panel-title">Live Audio Stream</div>
+    <div class="lc-stats">
+      <span>{html.escape(self.source_label)}</span>
+      <span>{len(self.windows)} chunks</span>
+    </div>
+    <div class="lc-source-detail">
+      This uses the same real-time chunk runner as the standalone demo.
+    </div>
+  </div>
+</div>
+"""
+
+    def _eval_audio_js(self, action: str) -> None:
+        script = (
+            f"const audio = document.getElementById({json.dumps(self.widget_id)});"
+            f"if (audio) {{ audio.{action}(); }}"
+        )
+        try:
+            from google.colab import output  # type: ignore
+
+            output.eval_js(script)
+        except Exception:
+            try:
+                from IPython.display import Javascript, display  # type: ignore
+
+                display(Javascript(script))
+            except Exception:
+                pass
+
+
+class FullDemoMicGate:
+    """ipywidgets-controlled mic gate for the full notebook UI."""
+
+    def __init__(self, widgets: Any, chunk_source: BrowserMicChunkSource) -> None:
+        self.widgets = widgets
+        self.chunk_source = chunk_source
+        self.status_html = widgets.HTML()
+        self.detail_html = widgets.HTML()
+        self.start_button = widgets.Button(
+            description="Start live mic",
+            icon="microphone",
+            button_style="danger",
+            layout=widgets.Layout(width="160px", height="42px"),
+        )
+        self.stop_button = widgets.Button(
+            description="Stop input",
+            icon="stop",
+            layout=widgets.Layout(width="140px", height="42px"),
+        )
+        self.start_button.on_click(lambda _button: self.start())
+        self.stop_button.on_click(lambda _button: self.stop())
+        self.ui = widgets.VBox(
+            [
+                widgets.HTML(self._showcase_html()),
+                widgets.HBox(
+                    [self.start_button, self.stop_button],
+                    layout=widgets.Layout(gap="8px", margin="10px 0 0 0"),
+                ),
+                self.status_html,
+                self.detail_html,
+            ],
+            layout=widgets.Layout(width="100%"),
+        )
+        self.publish("ready", "Press Start to open the browser mic.")
+
+    def start(self) -> None:
+        self.start_button.disabled = True
+        self.stop_button.disabled = False
+        self.publish("recording", "Browser mic is starting. Speak after permission is granted.")
+        self.chunk_source.start()
+
+    def stop(self) -> None:
+        self.start_button.disabled = True
+        self.stop_button.disabled = True
+        self.chunk_source.stop()
+        self.publish("stopped", "Input stopped. Queued chunks may still finish processing.")
+
+    def publish(self, state: str, detail: str) -> None:
+        self.status_html.value = (
+            '<div class="lc-selected-summary">'
+            f"<strong>{html.escape(state)}</strong>"
+            "</div>"
+        )
+        self.detail_html.value = (
+            '<div class="lc-source-detail">' + html.escape(detail) + "</div>"
+        )
+
+    def _showcase_html(self) -> str:
+        return """
+<div class="lc-viewer">
+  <div class="lc-video">
+    <div class="lc-video-art">
+      <div class="lc-video-badge">Live mic</div>
+      <div class="lc-host-frame">
+        <div class="lc-host-head"></div>
+        <div class="lc-host-body"></div>
+      </div>
+      <div class="lc-video-caption">Press Start to stream microphone chunks into ASR.</div>
+    </div>
+  </div>
+  <div class="lc-action-rail">
+    <div class="lc-panel-title">Live Microphone Stream</div>
+    <div class="lc-stats">
+      <span>Browser mic</span>
+      <span>Pause-aware chunks</span>
+    </div>
+    <div class="lc-source-detail">
+      Stop closes input; queued chunks still finish ASR and commerce actions.
+    </div>
+  </div>
+</div>
+"""
 
 
 def display_full_demo_ui(repo_root: Path = REPO_ROOT) -> None:
@@ -329,10 +596,7 @@ def display_full_demo_ui(repo_root: Path = REPO_ROOT) -> None:
                 pass
         stop = state.get("active_stop")
         if callable(stop):
-            try:
-                stop()
-            except Exception:
-                pass
+            threading.Thread(target=_call_safely, args=(stop,), daemon=True).start()
         state["active_stop"] = None
         state["active_cancel"] = None
         state["running"] = False
@@ -528,7 +792,7 @@ def display_full_demo_ui(repo_root: Path = REPO_ROOT) -> None:
                 silence_threshold=FULL_DEMO_SILENCE_THRESHOLD,
             )
         )
-        playback_gate: Optional[BrowserAudioPlaybackGate] = None
+        playback_gate: Optional[FullDemoPlaybackGate] = None
 
         with output:
             output.clear_output(wait=True)
@@ -539,15 +803,17 @@ def display_full_demo_ui(repo_root: Path = REPO_ROOT) -> None:
         with viewer:
             viewer.clear_output(wait=True)
             try:
-                playback_gate = BrowserAudioPlaybackGate(
+                playback_gate = FullDemoPlaybackGate(
+                    widgets=widgets,
                     audio_path=audio_path,
                     windows=windows,
+                    source_label=selected_source_label(),
                     poll_seconds=config.playback_poll_seconds,
                 )
-                playback_gate.install()
+                display(playback_gate.ui)
                 state["active_stop"] = playback_gate.stop
             except Exception as exc:
-                print(f"Browser live controls unavailable, using wall-clock replay: {exc}")
+                print(f"Full UI live controls unavailable, using wall-clock replay: {exc}")
                 playback_gate = None
 
         def worker() -> None:
@@ -598,8 +864,10 @@ def display_full_demo_ui(repo_root: Path = REPO_ROOT) -> None:
             viewer.clear_output(wait=True)
             try:
                 mic_source = BrowserMicChunkSource(config)
-                mic_source.install()
-                state["active_stop"] = mic_source.stop
+                mic_source.install_recorder()
+                mic_gate = FullDemoMicGate(widgets, mic_source)
+                display(mic_gate.ui)
+                state["active_stop"] = mic_gate.stop
             except Exception as exc:
                 print(f"Browser mic controls unavailable: {exc}")
                 mic_source = None
@@ -1425,6 +1693,13 @@ def _initials(value: str) -> str:
 def _safe_output_name(value: str) -> str:
     safe = "".join(ch.lower() if ch.isalnum() else "_" for ch in value)
     return "_".join(part for part in safe.split("_") if part) or "source"
+
+
+def _call_safely(callback: Any) -> None:
+    try:
+        callback()
+    except Exception:
+        pass
 
 
 def _style_block() -> str:

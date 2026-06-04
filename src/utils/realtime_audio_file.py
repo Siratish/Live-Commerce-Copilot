@@ -264,6 +264,15 @@ def run_realtime_audio_file_demo(
             "chunk_dir": str(chunk_dir),
         }
 
+    gate.publish(
+        {
+            "state": "loading_asr",
+            "status": f"loading_{config.asr_provider}_{config.asr_model}",
+            "totalChunks": len(audio_windows),
+            "processedChunks": 0,
+            "queueDepth": 0,
+        }
+    )
     asr_engine = asr or _build_file_stream_asr(config)
     catalog = load_product_catalog(config.catalog_path)
     promotions = load_promotions(config.promotions_path)
