@@ -67,10 +67,13 @@ class FullDemoSession:
         self.repo_root = repo_root
         self.output_dir = repo_root / "outputs" / "full_demo"
         self.upload_dir = self.output_dir / "uploads"
+        self.product_image_dir = self.output_dir / "product_images"
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.upload_dir.mkdir(parents=True, exist_ok=True)
+        self.product_image_dir.mkdir(parents=True, exist_ok=True)
         self.catalog = load_product_catalog(DEFAULT_CATALOG)
         self.promotions = load_promotions(DEFAULT_PROMOTIONS)
+        self.product_images: Dict[str, str] = {}
         self.catalog_path = self.output_dir / "session_product_catalog.csv"
         self.promotions_path = self.output_dir / "session_promotions.csv"
         self.save_catalog_files()
@@ -79,9 +82,15 @@ class FullDemoSession:
         save_product_catalog_csv(self.catalog, self.catalog_path)
         save_promotions_csv(self.promotions, self.promotions_path)
 
-    def add_product(self, item: ProductCatalogItem) -> None:
+    def add_product(
+        self,
+        item: ProductCatalogItem,
+        image_path: Optional[Path] = None,
+    ) -> None:
         self.catalog = [existing for existing in self.catalog if existing.sku != item.sku]
         self.catalog.append(item)
+        if image_path is not None and image_path.exists():
+            self.product_images[item.sku] = _image_data_uri(image_path)
         self.save_catalog_files()
 
     def add_promotion(self, promotion: Promotion) -> None:
@@ -92,6 +101,16 @@ class FullDemoSession:
         ]
         self.promotions.append(promotion)
         self.save_catalog_files()
+
+
+_FULL_DEMO_SESSIONS: Dict[Path, FullDemoSession] = {}
+
+
+def _get_full_demo_session(repo_root: Path = REPO_ROOT) -> FullDemoSession:
+    resolved = Path(repo_root).resolve()
+    if resolved not in _FULL_DEMO_SESSIONS:
+        _FULL_DEMO_SESSIONS[resolved] = FullDemoSession(resolved)
+    return _FULL_DEMO_SESSIONS[resolved]
 
 
 class FullDemoPlaybackGate:
@@ -786,7 +805,7 @@ class FullDemoMicGate:
 """
 
 
-def display_full_demo_ui(repo_root: Path = REPO_ROOT) -> None:
+def _display_full_demo_ui_legacy(repo_root: Path = REPO_ROOT) -> None:
     """Display a single-notebook UI for the full live-commerce copilot demo."""
     try:
         import ipywidgets as widgets  # type: ignore
@@ -1411,6 +1430,349 @@ def display_full_demo_ui(repo_root: Path = REPO_ROOT) -> None:
     refresh_catalog()
 
 
+def display_full_demo_ui(repo_root: Path = REPO_ROOT) -> None:
+    """Display the simplified recording-only notebook demo UI."""
+    try:
+        import ipywidgets as widgets  # type: ignore
+        from IPython.display import HTML, display  # type: ignore
+    except ImportError:
+        return
+
+    session = _get_full_demo_session(repo_root)
+    state: Dict[str, Any] = {"running": False, "source": None}
+    display(HTML(_style_block()))
+
+    source_picker = widgets.HBox(layout=widgets.Layout(gap="10px", flex_flow="row wrap"))
+    status_html = widgets.HTML()
+    viewer = widgets.Output()
+    upload = widgets.FileUpload(
+        accept="audio/*",
+        multiple=False,
+        description="Upload audio",
+        layout=widgets.Layout(width="180px", height="44px"),
+    )
+    try:
+        upload.icon = "upload"
+    except Exception:
+        pass
+
+    audio1_button = widgets.Button(
+        description="Audio 1",
+        icon="play",
+        button_style="danger",
+        tooltip="Beauty sample",
+        layout=widgets.Layout(width="132px", height="44px"),
+    )
+    audio2_button = widgets.Button(
+        description="Audio 2",
+        icon="play",
+        button_style="danger",
+        tooltip="Tech sample",
+        layout=widgets.Layout(width="132px", height="44px"),
+    )
+    mic_button = widgets.Button(
+        description="Mic",
+        icon="microphone",
+        layout=widgets.Layout(width="120px", height="44px"),
+    )
+    source_picker.children = [audio1_button, audio2_button, upload, mic_button]
+
+    controls = widgets.VBox(
+        [
+            widgets.HTML('<div class="lc-panel-title">Recording demo</div>'),
+            source_picker,
+            status_html,
+        ],
+        layout=widgets.Layout(width="100%", gap="10px"),
+    )
+    controls.add_class("lc-operator-panel")
+    app = widgets.HBox(
+        [
+            widgets.VBox([controls], layout=widgets.Layout(width="32%", min_width="280px")),
+            widgets.VBox([viewer], layout=widgets.Layout(width="68%")),
+        ],
+        layout=widgets.Layout(align_items="flex-start", gap="14px"),
+    )
+    display(app)
+
+    def set_busy(is_busy: bool) -> None:
+        state["running"] = is_busy
+        source_picker.layout.display = "none" if is_busy else ""
+        upload.disabled = is_busy
+        audio1_button.disabled = is_busy
+        audio2_button.disabled = is_busy
+        mic_button.disabled = is_busy
+
+    def set_status(kind: str, title: str, detail: str = "") -> None:
+        status_html.value = _status_card_html(kind, title, detail)
+
+    def clear_status() -> None:
+        status_html.value = ""
+
+    def render_idle() -> None:
+        with viewer:
+            viewer.clear_output(wait=True)
+            display(HTML(_recording_empty_state_html()))
+
+    def process_audio(audio_path: Path, source_key: str, source_label: str) -> None:
+        if state.get("running"):
+            return
+        set_busy(True)
+        clear_status()
+        with viewer:
+            viewer.clear_output(wait=True)
+            display(HTML(build_processing_scene_html("Processing recording", source_label)))
+        try:
+            summary, captions, actions = run_recording_pipeline(
+                session=session,
+                audio_path=audio_path,
+                source_key=source_key,
+                asr_provider=FULL_DEMO_ASR_PROVIDER,
+                asr_model=FULL_DEMO_ASR_MODEL,
+                use_cached=False,
+                dynamic_chunking=FULL_DEMO_DYNAMIC_CHUNKING,
+                chunk_seconds=FULL_DEMO_CHUNK_SECONDS,
+                pause_seconds=FULL_DEMO_PAUSE_SECONDS,
+                silence_threshold=FULL_DEMO_SILENCE_THRESHOLD,
+            )
+            state["last_summary"] = summary
+            with viewer:
+                viewer.clear_output(wait=True)
+                display(
+                    HTML(
+                        build_viewer_scene_html(
+                            audio_path=audio_path,
+                            captions=captions,
+                            actions=actions,
+                            mode_label="Recording",
+                            title="ASR + action preview",
+                            show_audio_controls=True,
+                            catalog=session.catalog,
+                            product_images=session.product_images,
+                        )
+                    )
+                )
+        except Exception as exc:
+            set_status("error", "Demo failed", str(exc))
+        finally:
+            set_busy(False)
+
+    def process_mic() -> None:
+        if state.get("running"):
+            return
+        set_busy(True)
+        clear_status()
+        try:
+            with viewer:
+                viewer.clear_output(wait=True)
+                audio_path = record_colab_mic_clip(
+                    session.upload_dir,
+                    max_seconds=FULL_DEMO_CHUNK_SECONDS,
+                )
+            set_busy(False)
+            process_audio(audio_path, "mic", "Browser microphone recording")
+        except Exception as exc:
+            set_status("error", "Mic recording failed", str(exc))
+            render_idle()
+        finally:
+            if state.get("running"):
+                set_busy(False)
+
+    def on_upload_change(change: Dict[str, Any]) -> None:
+        if not change.get("new") or state.get("running"):
+            return
+        audio_path = save_uploaded_audio(upload, session.upload_dir)
+        if audio_path is None:
+            set_status("error", "Upload failed", "No audio file was available.")
+            return
+        process_audio(audio_path, "upload", audio_path.name)
+
+    audio1_button.on_click(
+        lambda _button: process_audio(
+            SAMPLE_AUDIO["Audio 1 - Beauty"],
+            "Audio 1 - Beauty",
+            "Audio 1 - Beauty",
+        )
+    )
+    audio2_button.on_click(
+        lambda _button: process_audio(
+            SAMPLE_AUDIO["Audio 2 - Tech"],
+            "Audio 2 - Tech",
+            "Audio 2 - Tech",
+        )
+    )
+    mic_button.on_click(lambda _button: process_mic())
+    upload.observe(on_upload_change, names="value")
+    render_idle()
+
+
+def display_catalog_manager_ui(repo_root: Path = REPO_ROOT) -> None:
+    """Display the separate catalog/promotion manager notebook UI."""
+    try:
+        import ipywidgets as widgets  # type: ignore
+        from IPython.display import HTML, display  # type: ignore
+    except ImportError:
+        return
+
+    session = _get_full_demo_session(repo_root)
+    state: Dict[str, str] = {"view": "products"}
+    display(HTML(_style_block()))
+
+    product_button = widgets.Button(
+        description="Products",
+        icon="shopping-bag",
+        button_style="danger",
+        layout=widgets.Layout(width="150px", height="42px"),
+    )
+    promo_button = widgets.Button(
+        description="Promotions",
+        icon="tags",
+        layout=widgets.Layout(width="150px", height="42px"),
+    )
+    add_button = widgets.Button(
+        description="",
+        icon="plus",
+        button_style="success",
+        tooltip="Add item",
+        layout=widgets.Layout(width="44px", height="40px"),
+    )
+    list_output = widgets.Output()
+    form_box = widgets.VBox(layout=widgets.Layout(width="100%"))
+
+    def render_list() -> None:
+        product_button.button_style = "danger" if state["view"] == "products" else ""
+        promo_button.button_style = "danger" if state["view"] == "promotions" else ""
+        with list_output:
+            list_output.clear_output(wait=True)
+            display(
+                HTML(
+                    build_catalog_scene_html(
+                        session.catalog,
+                        session.promotions,
+                        view=state["view"],
+                        product_images=session.product_images,
+                    )
+                )
+            )
+
+    def show_product_form() -> None:
+        product_fields = {
+            "sku": widgets.Text(value=f"SKU{len(session.catalog) + 1:03d}", description="SKU"),
+            "product_name": widgets.Text(value="Live Demo Product", description="Name"),
+            "brand": widgets.Text(value="DemoBrand", description="Brand"),
+            "category": widgets.Text(value="Skincare", description="Category"),
+            "price": widgets.IntText(value=399, description="Price"),
+            "discount_price": widgets.IntText(value=299, description="Live price"),
+            "stock": widgets.IntText(value=50, description="Stock"),
+            "description": widgets.Textarea(value="Demo product added from notebook UI", description="Desc"),
+            "tags": widgets.Text(value="demo;skincare", description="Tags"),
+            "compatible_with": widgets.Text(value="SKU001", description="Compatible"),
+            "deeplink": widgets.Text(value="https://trueid.example/live/product", description="Link"),
+        }
+        image_upload = widgets.FileUpload(
+            accept="image/*",
+            multiple=False,
+            description="Upload image",
+            layout=widgets.Layout(width="220px"),
+        )
+        save = widgets.Button(description="Add product", icon="check", button_style="success")
+        cancel = widgets.Button(description="Cancel", icon="times")
+
+        def on_save(_: Any) -> None:
+            item = ProductCatalogItem.from_dict(
+                {key: field.value for key, field in product_fields.items()}
+            )
+            image_path = save_uploaded_image(
+                image_upload,
+                session.product_image_dir,
+                item.sku,
+            )
+            session.add_product(item, image_path=image_path)
+            form_box.children = []
+            render_list()
+
+        save.on_click(on_save)
+        cancel.on_click(lambda _button: setattr(form_box, "children", []))
+        form_box.children = [
+            widgets.VBox(
+                [
+                    widgets.HTML('<div class="lc-form-title">Add product</div>'),
+                    *product_fields.values(),
+                    image_upload,
+                    widgets.HBox([save, cancel], layout=widgets.Layout(gap="8px")),
+                ]
+            )
+        ]
+
+    def show_promo_form() -> None:
+        promo_fields = {
+            "promo_code": widgets.Text(value="NEWLIVE", description="Code"),
+            "promo_description": widgets.Text(value="Notebook-added live promo", description="Desc"),
+            "discount_type": widgets.Dropdown(
+                options=["percent", "fixed_amount"],
+                value="percent",
+                description="Type",
+            ),
+            "discount_value": widgets.IntText(value=10, description="Value"),
+            "live_only": widgets.Checkbox(value=True, description="Live only", indent=False),
+            "eligible_categories": widgets.Text(value="Skincare", description="Categories"),
+            "eligible_tags": widgets.Text(value="skincare", description="Tags"),
+            "eligible_skus": widgets.Text(value="", description="SKUs"),
+            "required_min_stock": widgets.IntText(value=1, description="Min stock"),
+        }
+        save = widgets.Button(description="Add promotion", icon="check", button_style="success")
+        cancel = widgets.Button(description="Cancel", icon="times")
+
+        def on_save(_: Any) -> None:
+            promotion = Promotion.from_dict(
+                {key: field.value for key, field in promo_fields.items()}
+            )
+            session.add_promotion(promotion)
+            form_box.children = []
+            render_list()
+
+        save.on_click(on_save)
+        cancel.on_click(lambda _button: setattr(form_box, "children", []))
+        form_box.children = [
+            widgets.VBox(
+                [
+                    widgets.HTML('<div class="lc-form-title">Add promotion</div>'),
+                    *promo_fields.values(),
+                    widgets.HBox([save, cancel], layout=widgets.Layout(gap="8px")),
+                ]
+            )
+        ]
+
+    def switch_view(view: str) -> None:
+        state["view"] = view
+        form_box.children = []
+        render_list()
+
+    product_button.on_click(lambda _button: switch_view("products"))
+    promo_button.on_click(lambda _button: switch_view("promotions"))
+    add_button.on_click(
+        lambda _button: show_product_form()
+        if state["view"] == "products"
+        else show_promo_form()
+    )
+
+    display(
+        widgets.VBox(
+            [
+                widgets.HBox(
+                    [product_button, promo_button],
+                    layout=widgets.Layout(gap="10px"),
+                ),
+                list_output,
+                widgets.HBox([add_button], layout=widgets.Layout(justify_content="center")),
+                form_box,
+            ],
+            layout=widgets.Layout(width="100%", gap="12px"),
+        )
+    )
+    render_list()
+
+
 def _sample_source_card_widget(
     widgets: Any,
     key: str,
@@ -1694,19 +2056,33 @@ def render_summary(summary: Dict[str, Any], output: Any) -> None:
 def build_catalog_scene_html(
     catalog: Sequence[ProductCatalogItem],
     promotions: Sequence[Promotion],
+    view: str = "products",
+    product_images: Optional[Dict[str, str]] = None,
 ) -> str:
-    product_cards = "\n".join(_product_card_html(item) for item in catalog)
-    promo_cards = "\n".join(_promo_card_html(promotion) for promotion in promotions)
+    product_images = product_images or {}
+    normalized_view = (view or "products").lower()
+    if normalized_view == "promotions":
+        promo_cards = "\n".join(_promo_card_html(promotion) for promotion in promotions)
+        return f"""
+<div class="lc-catalog-shell">
+  <div class="lc-catalog-heading">
+    <div class="lc-panel-title">Promotions</div>
+    <span>{len(promotions)} active rules</span>
+  </div>
+  <div class="lc-card-grid">{promo_cards}</div>
+</div>
+"""
+
+    product_cards = "\n".join(
+        _product_card_html(item, product_images.get(item.sku)) for item in catalog
+    )
     return f"""
-<div class="lc-catalog-grid">
-  <div>
-    <div class="lc-panel-title">Products ({len(catalog)})</div>
-    <div class="lc-card-grid">{product_cards}</div>
+<div class="lc-catalog-shell">
+  <div class="lc-catalog-heading">
+    <div class="lc-panel-title">Products</div>
+    <span>{len(catalog)} catalog items</span>
   </div>
-  <div>
-    <div class="lc-panel-title">Promotions ({len(promotions)})</div>
-    <div class="lc-card-grid">{promo_cards}</div>
-  </div>
+  <div class="lc-card-grid">{product_cards}</div>
 </div>
 """
 
@@ -1802,6 +2178,33 @@ def build_processing_scene_html(title: str, detail: str) -> str:
 """
 
 
+def _status_card_html(kind: str, title: str, detail: str = "") -> str:
+    return (
+        f'<div class="lc-status-card lc-status-{html.escape(kind)}">'
+        f"<strong>{html.escape(title)}</strong>"
+        f"<span>{html.escape(detail)}</span>"
+        "</div>"
+    )
+
+
+def _recording_empty_state_html() -> str:
+    return """
+<div class="lc-recording-empty">
+  <div class="lc-empty-mark">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M4 7h16v10H4z"/>
+      <path d="M8 11h8"/>
+      <path d="M10 15h4"/>
+    </svg>
+  </div>
+  <div>
+    <div class="lc-panel-title">Choose an audio source</div>
+    <div class="lc-muted">Captions and commerce actions appear here after the recording is processed.</div>
+  </div>
+</div>
+"""
+
+
 def build_viewer_scene_html(
     audio_path: Optional[Path],
     captions: CaptionResult,
@@ -1809,9 +2212,12 @@ def build_viewer_scene_html(
     mode_label: str,
     title: str,
     show_audio_controls: bool = True,
+    catalog: Optional[Sequence[ProductCatalogItem]] = None,
+    product_images: Optional[Dict[str, str]] = None,
 ) -> str:
     segments = [segment.to_dict() for segment in captions.segments]
     action_payload = [action.to_dict() for action in actions]
+    product_payload = _product_map_payload(catalog or [], product_images)
     audio_html = ""
     if audio_path and audio_path.exists() and show_audio_controls:
         audio_html = (
@@ -1850,13 +2256,76 @@ def build_viewer_scene_html(
   const root = document.currentScript.previousElementSibling;
   const captions = {json.dumps(segments, ensure_ascii=False)};
   const actions = {json.dumps(action_payload, ensure_ascii=False)};
+  const products = {json.dumps(product_payload, ensure_ascii=False)};
   const audio = root.querySelector("audio");
   const captionEl = root.querySelector('[data-role="caption"]');
   const actionsEl = root.querySelector('[data-role="actions"]');
+  const escapeHtml = value => String(value ?? "").replace(/[&<>"']/g, ch => ({{
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '"': "&quot;",
+    "'": "&#39;"
+  }}[ch]));
+  const productVisual = sku => products[sku]?.visual || `<div class="lc-action-product-thumb"><span>${{escapeHtml(String(sku || "?").slice(-2))}}</span></div>`;
+  const productLine = sku => {{
+    const product = products[sku] || {{}};
+    const name = product.product_name || sku;
+    const price = product.discount_price ? `THB ${{product.discount_price}}` : "";
+    const original = product.price && product.price !== product.discount_price ? `<s>${{product.price}}</s>` : "";
+    return `
+      <div class="lc-action-product-row">
+        ${{productVisual(sku)}}
+        <div>
+          <strong>${{escapeHtml(name)}}</strong>
+          <div class="lc-muted">${{escapeHtml(product.brand || product.category || sku)}}</div>
+          <div class="lc-action-price">${{price}} ${{original}}</div>
+        </div>
+      </div>`;
+  }};
   const renderAction = (action) => {{
-    const title = action.display_payload?.title || action.action_type;
-    const skus = (action.skus || []).join(" + ");
-    return `<div class="lc-action-card"><div class="lc-action-type">${{action.action_type}}</div><strong>${{title}}</strong><div>${{skus}}</div><small>${{Number(action.timestamp || 0).toFixed(2)}}s</small></div>`;
+    const payload = action.display_payload || {{}};
+    const actionType = action.action_type || "ACTION";
+    const skus = action.skus || [];
+    const time = Number(action.timestamp || 0).toFixed(2);
+    if (actionType === "PIN_PRODUCT_CARD") {{
+      const sku = skus[0];
+      return `<div class="lc-action-card lc-action-pin">
+        <div class="lc-action-top"><span>${{escapeHtml(actionType)}}</span><small>${{time}}s</small></div>
+        ${{productLine(sku)}}
+      </div>`;
+    }}
+    if (actionType === "SHOW_PROMO_CODE") {{
+      return `<div class="lc-action-card lc-action-promo">
+        <div class="lc-action-top"><span>${{escapeHtml(actionType)}}</span><small>${{time}}s</small></div>
+        <div class="lc-promo-badge">${{escapeHtml(payload.promo_code || "PROMO")}}</div>
+        <strong>${{escapeHtml(payload.promo_description || payload.title || "Promo code detected")}}</strong>
+        <div class="lc-mini-product-row">${{skus.map(productVisual).join("")}}</div>
+        <div class="lc-muted">${{skus.map(escapeHtml).join(" + ")}}</div>
+      </div>`;
+    }}
+    if (actionType === "SHOW_BUNDLE_RECOMMENDATION") {{
+      return `<div class="lc-action-card lc-action-bundle">
+        <div class="lc-action-top"><span>${{escapeHtml(actionType)}}</span><small>${{time}}s</small></div>
+        <strong>${{escapeHtml(payload.title || "Recommended bundle")}}</strong>
+        <div class="lc-bundle-row">${{skus.map(productVisual).join('<div class="lc-bundle-plus">+</div>')}}</div>
+        <div class="lc-muted">${{escapeHtml(payload.reason || skus.join(" + "))}}</div>
+      </div>`;
+    }}
+    if (actionType === "START_FLASH_SALE_COUNTDOWN") {{
+      return `<div class="lc-action-card lc-action-countdown">
+        <div class="lc-action-top"><span>${{escapeHtml(actionType)}}</span><small>${{time}}s</small></div>
+        <div class="lc-countdown-time">${{escapeHtml(payload.duration_minutes || 5)}} min</div>
+        <strong>${{escapeHtml(payload.promo_code || "Live deal")}}</strong>
+        <div class="lc-mini-product-row">${{skus.map(productVisual).join("")}}</div>
+        <div class="lc-muted">Flash sale window started.</div>
+      </div>`;
+    }}
+    return `<div class="lc-action-card">
+      <div class="lc-action-top"><span>${{escapeHtml(actionType)}}</span><small>${{time}}s</small></div>
+      <strong>${{escapeHtml(payload.title || actionType)}}</strong>
+      <div class="lc-muted">${{skus.map(escapeHtml).join(" + ")}}</div>
+    </div>`;
   }};
   const render = () => {{
     const t = audio ? (audio.currentTime || 0) : Number.POSITIVE_INFINITY;
@@ -1894,6 +2363,33 @@ def save_uploaded_audio(upload_widget: Any, output_dir: Path) -> Optional[Path]:
         return None
     safe_name = "".join(ch for ch in str(name) if ch.isalnum() or ch in "._-") or "uploaded_audio"
     path = output_dir / safe_name
+    path.write_bytes(bytes(content))
+    return path
+
+
+def save_uploaded_image(
+    upload_widget: Any,
+    output_dir: Path,
+    sku: str,
+) -> Optional[Path]:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    value = upload_widget.value
+    if not value:
+        return None
+
+    if isinstance(value, dict):
+        name, payload = next(iter(value.items()))
+        content = payload.get("content")
+    else:
+        payload = value[0]
+        name = payload.get("name", "product_image")
+        content = payload.get("content")
+
+    if content is None:
+        return None
+    suffix = Path(str(name)).suffix or ".png"
+    safe_sku = "".join(ch for ch in str(sku) if ch.isalnum() or ch in "._-") or "product"
+    path = output_dir / f"{safe_sku}{suffix}"
     path.write_bytes(bytes(content))
     return path
 
@@ -2138,13 +2634,20 @@ def _audio_data_uri(audio_path: Path) -> str:
     return f"data:{mime_type};base64,{encoded}"
 
 
-def _product_card_html(item: ProductCatalogItem) -> str:
+def _image_data_uri(image_path: Path) -> str:
+    mime_type, _ = mimetypes.guess_type(str(image_path))
+    mime_type = mime_type or "image/png"
+    encoded = base64.b64encode(image_path.read_bytes()).decode("ascii")
+    return f"data:{mime_type};base64,{encoded}"
+
+
+def _product_card_html(item: ProductCatalogItem, image_uri: Optional[str] = None) -> str:
     initials = _initials(item.product_name)
     tags = " ".join(f"<span>{html.escape(tag)}</span>" for tag in item.tags[:4])
     compatible = ", ".join(item.compatible_with) or "None"
     return f"""
 <div class="lc-product-card">
-  <div class="lc-product-thumb">{html.escape(initials)}</div>
+  {_product_visual_html(item, image_uri)}
   <div>
     <strong>{html.escape(item.product_name)}</strong>
     <div class="lc-muted">{html.escape(item.brand)} &middot; {html.escape(item.category)}</div>
@@ -2180,6 +2683,95 @@ def _initials(value: str) -> str:
 def _safe_output_name(value: str) -> str:
     safe = "".join(ch.lower() if ch.isalnum() else "_" for ch in value)
     return "_".join(part for part in safe.split("_") if part) or "source"
+
+
+def _product_visual_html(
+    item: ProductCatalogItem,
+    image_uri: Optional[str] = None,
+    class_name: str = "lc-product-thumb",
+) -> str:
+    if image_uri:
+        return (
+            f'<div class="{class_name} lc-product-photo">'
+            f'<img src="{html.escape(image_uri)}" alt="{html.escape(item.product_name)}">'
+            "</div>"
+        )
+    return (
+        f'<div class="{class_name}">'
+        f"{_product_icon_svg(item)}"
+        f'<span>{html.escape(_initials(item.product_name))}</span>'
+        "</div>"
+    )
+
+
+def _product_icon_svg(item: ProductCatalogItem) -> str:
+    text = " ".join(
+        [
+            item.product_name,
+            item.category,
+            item.description,
+            " ".join(item.tags),
+        ]
+    ).lower()
+    if "earbud" in text or "bluetooth" in text or "music" in text:
+        path = (
+            '<path d="M8 12a4 4 0 0 1 8 0v4a2 2 0 0 1-2 2h-1v-6h3"/>'
+            '<path d="M8 12v6H7a2 2 0 0 1-2-2v-4"/>'
+            '<path d="M13 18v2"/>'
+            '<path d="M7 18v2"/>'
+        )
+    elif "power" in text or "bank" in text or "charge" in text:
+        path = (
+            '<rect x="4" y="7" width="14" height="10" rx="2"/>'
+            '<path d="M18 10h2v4h-2"/>'
+            '<path d="M8 11h3l-2 4h3"/>'
+        )
+    elif "stand" in text:
+        path = (
+            '<rect x="8" y="4" width="8" height="12" rx="2"/>'
+            '<path d="M9 20h6"/>'
+            '<path d="M12 16v4"/>'
+        )
+    elif "drink" in text or "collagen" in text or "jelly" in text:
+        path = (
+            '<path d="M8 4h8l-1 16H9L8 4z"/>'
+            '<path d="M9 8h6"/>'
+            '<path d="M10 12h4"/>'
+        )
+    elif "sunscreen" in text or "spf" in text:
+        path = (
+            '<circle cx="12" cy="12" r="4"/>'
+            '<path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.5 4.5l2.1 2.1M17.4 17.4l2.1 2.1M19.5 4.5l-2.1 2.1M6.6 17.4l-2.1 2.1"/>'
+        )
+    else:
+        path = (
+            '<path d="M9 3h6l1 4v13H8V7l1-4z"/>'
+            '<path d="M9 7h6"/>'
+            '<path d="M10 12h4"/>'
+        )
+    return (
+        '<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" '
+        'stroke="currentColor" stroke-width="1.8" stroke-linecap="round" '
+        f'stroke-linejoin="round">{path}</svg>'
+    )
+
+
+def _product_map_payload(
+    catalog: Sequence[ProductCatalogItem],
+    product_images: Optional[Dict[str, str]] = None,
+) -> Dict[str, Dict[str, Any]]:
+    product_images = product_images or {}
+    return {
+        item.sku: {
+            **item.to_dict(),
+            "visual": _product_visual_html(
+                item,
+                product_images.get(item.sku),
+                class_name="lc-action-product-thumb",
+            ),
+        }
+        for item in catalog
+    }
 
 
 def _call_safely(callback: Any) -> None:
@@ -2231,6 +2823,12 @@ def _style_block() -> str:
 .lc-processing-panel{border:1px solid #d0d5dd;border-radius:8px;background:#fff;color:#111827;padding:18px;box-shadow:0 8px 24px rgba(16,24,40,.06)}
 .lc-processing-steps{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px}
 .lc-processing-steps span{border-radius:999px;background:#f2f4f7;color:#344054;padding:5px 9px;font-size:12px;font-weight:700}
+.lc-status-card{border:1px solid #d0d5dd;border-radius:8px;background:#fff;color:#111827;padding:10px;display:flex;flex-direction:column;gap:3px}
+.lc-status-card span{color:#667085;font-size:12px;line-height:1.35}
+.lc-status-error{border-color:#fecaca;background:#fef2f2;color:#7f1d1d}
+.lc-recording-empty{border:1px solid #d0d5dd;border-radius:8px;background:#fff;color:#111827;min-height:480px;display:flex;align-items:center;justify-content:center;gap:14px;padding:24px;box-shadow:0 8px 24px rgba(16,24,40,.06)}
+.lc-empty-mark{width:64px;height:64px;border-radius:8px;background:#fff7ed;color:#b42318;border:1px solid #fed7aa;display:flex;align-items:center;justify-content:center}
+.lc-empty-mark svg{width:32px;height:32px}
 .lc-viewer{display:grid;grid-template-columns:minmax(0,1.25fr) minmax(260px,.75fr);gap:14px;border:1px solid #d0d5dd;border-radius:8px;padding:14px;background:#fff;margin-bottom:12px;box-shadow:0 8px 24px rgba(16,24,40,.06)}
 .lc-video-art{height:390px;background:#171717;border-radius:8px;position:relative;overflow:hidden}
 .lc-video-art:before{content:"";position:absolute;inset:0;background:linear-gradient(145deg,#171717 0%,#7f1d1d 54%,#0f766e 100%)}
@@ -2260,17 +2858,51 @@ def _style_block() -> str:
 .lc-live-controls button[data-role=stop]{background:#f2f4f7;color:#344054}
 .lc-live-controls button:disabled{opacity:.5;cursor:not-allowed}
 .lc-action-card,.lc-product-card,.lc-promo-card{border:1px solid #d0d5dd;border-radius:8px;padding:11px;background:#fff;color:#111827;box-shadow:0 2px 8px rgba(16,24,40,.04)}
-.lc-action-type{font-size:11px;color:#b42318;font-weight:800;margin-bottom:4px}
+.lc-action-card{display:flex;flex-direction:column;gap:8px}
+.lc-action-top{display:flex;justify-content:space-between;gap:8px;align-items:center}
+.lc-action-top span,.lc-action-type{font-size:11px;color:#b42318;font-weight:900;letter-spacing:.04em}
+.lc-action-top small{font-size:11px;color:#667085}
+.lc-action-pin{border-color:#bfdbfe;background:#eff6ff}
+.lc-action-promo{border-color:#fed7aa;background:#fff7ed}
+.lc-action-bundle{border-color:#bbf7d0;background:#f0fdf4}
+.lc-action-countdown{border-color:#fecaca;background:#fef2f2}
+.lc-action-product-row{display:grid;grid-template-columns:54px minmax(0,1fr);gap:10px;align-items:center}
+.lc-action-product-thumb{width:52px;height:52px;border-radius:8px;background:#fee2e2;color:#991b1b;display:flex;align-items:center;justify-content:center;position:relative;overflow:hidden;flex:0 0 auto}
+.lc-action-product-thumb svg{width:27px;height:27px}
+.lc-action-product-thumb span{position:absolute;right:5px;bottom:3px;font-size:10px;font-weight:900}
+.lc-action-product-thumb img{width:100%;height:100%;object-fit:cover}
+.lc-action-price{font-weight:900;color:#111827}.lc-action-price s{color:#667085;font-weight:400;margin-left:5px}
+.lc-promo-badge{align-self:flex-start;border-radius:8px;background:#b42318;color:#fff;padding:7px 10px;font-size:18px;font-weight:900;letter-spacing:.04em}
+.lc-bundle-row{display:flex;align-items:center;gap:8px}
+.lc-mini-product-row{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.lc-mini-product-row .lc-action-product-thumb{width:36px;height:36px}
+.lc-mini-product-row .lc-action-product-thumb svg{width:20px;height:20px}
+.lc-mini-product-row .lc-action-product-thumb span{font-size:8px}
+.lc-bundle-plus{font-weight:900;color:#15803d}
+.lc-countdown-time{font-size:34px;line-height:1;font-weight:900;color:#b42318}
 .lc-catalog-grid{display:grid;grid-template-columns:1.35fr .9fr;gap:14px}
+.lc-catalog-shell{border:1px solid #374151;border-radius:8px;background:#111827;color:#f9fafb;padding:14px;box-shadow:0 10px 28px rgba(0,0,0,.22)}
+.lc-catalog-shell .lc-panel-title{color:#f9fafb}
+.lc-catalog-shell .lc-muted{color:#cbd5e1}
+.lc-catalog-heading{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:12px}
+.lc-catalog-heading span{color:#cbd5e1;font-size:12px;background:#1f2937;border-radius:999px;padding:5px 10px}
+.lc-catalog-shell .lc-product-card,.lc-catalog-shell .lc-promo-card{background:#1f2937;border-color:#374151;color:#f9fafb;box-shadow:none}
+.lc-catalog-shell .lc-product-card strong,.lc-catalog-shell .lc-promo-card strong,.lc-catalog-shell .lc-price{color:#f9fafb}
+.lc-catalog-shell .lc-tags span{background:#374151;color:#e5e7eb}
 .lc-card-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:10px}
 .lc-product-card{display:grid;grid-template-columns:64px minmax(0,1fr);gap:12px}
 .lc-product-card strong,.lc-promo-card strong{color:#111827}
-.lc-product-thumb{width:62px;height:62px;border-radius:8px;background:#fee2e2;color:#991b1b;display:flex;align-items:center;justify-content:center;font-weight:900}
+.lc-product-thumb{width:62px;height:62px;border-radius:8px;background:#fee2e2;color:#991b1b;display:flex;align-items:center;justify-content:center;font-weight:900;position:relative;overflow:hidden}
+.lc-product-thumb svg{width:32px;height:32px}
+.lc-product-thumb span{position:absolute;right:6px;bottom:4px;font-size:11px}
+.lc-product-thumb img{width:100%;height:100%;object-fit:cover}
 .lc-price{font-weight:800;margin:5px 0;color:#111827}.lc-price s{color:#667085;font-weight:400;margin-left:6px}
 .lc-muted{color:#667085;font-size:12px;line-height:1.35}
 .lc-tags{display:flex;flex-wrap:wrap;gap:5px;margin-top:7px}
 .lc-tags span{background:#f2f4f7;border-radius:999px;padding:2px 7px;font-size:11px;color:#344054}
 .lc-promo-code{font-weight:900;color:#b42318;font-size:15px;margin-bottom:5px}
+.lc-form-title{font-weight:900;font-size:16px;color:#111827;margin:8px 0}
+.lc-catalog-shell .lc-product-card strong,.lc-catalog-shell .lc-promo-card strong,.lc-catalog-shell .lc-price{color:#f9fafb}
 @media (max-width: 960px){.lc-viewer,.lc-catalog-grid{grid-template-columns:1fr}.lc-header{flex-direction:column;gap:10px}}
 </style>
 """

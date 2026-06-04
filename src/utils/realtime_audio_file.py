@@ -56,7 +56,7 @@ class WallClockPlaybackGate:
         self.latest_status: Dict[str, Any] = {"currentTime": 0.0}
 
     def install(self) -> None:
-        print("Colab browser playback APIs are unavailable; using wall-clock replay.")
+        return
 
     def wait_for_start(self) -> Dict[str, Any]:
         self.started_at = time.monotonic()
@@ -86,8 +86,7 @@ class WallClockPlaybackGate:
         return self.latest_status
 
     def publish(self, payload: Dict[str, Any]) -> None:
-        if payload.get("state"):
-            print(f"[file stream] {payload['state']}: {payload.get('status', '')}")
+        return
 
 
 class BrowserAudioPlaybackGate:
@@ -481,6 +480,7 @@ def _realtime_file_result_payload(
                 "action": action.action_type,
                 "title": action.display_payload.get("title", action.action_type),
                 "skus": " + ".join(action.skus),
+                "displayPayload": action.display_payload,
             }
             for action in actions[-6:]
         ],
@@ -617,11 +617,19 @@ def _build_realtime_audio_file_html(
     #{widget_id} .rt-stats{{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}}
     #{widget_id} .rt-stats span{{background:#f2f4f7;border-radius:999px;padding:5px 10px;font-size:13px;color:#344054}}
     #{widget_id} .rt-actions{{display:flex;flex-direction:column;gap:10px}}
-    #{widget_id} .rt-action-card{{border:1px solid #d0d5dd;border-radius:8px;padding:12px;background:#fff;color:#111827;box-shadow:0 2px 8px rgba(16,24,40,.04)}}
+    #{widget_id} .rt-action-card{{border:1px solid #d0d5dd;border-radius:8px;padding:12px;background:#fff;color:#111827;box-shadow:0 2px 8px rgba(16,24,40,.04);display:flex;flex-direction:column;gap:7px}}
+    #{widget_id} .rt-action-pin{{border-color:#bfdbfe;background:#eff6ff}}
+    #{widget_id} .rt-action-promo{{border-color:#fed7aa;background:#fff7ed}}
+    #{widget_id} .rt-action-bundle{{border-color:#bbf7d0;background:#f0fdf4}}
+    #{widget_id} .rt-action-countdown{{border-color:#fecaca;background:#fef2f2}}
     #{widget_id} .rt-action-type{{font-size:11px;color:#b42318;font-weight:900;margin-bottom:5px;letter-spacing:.04em}}
+    #{widget_id} .rt-action-top{{display:flex;justify-content:space-between;align-items:center;gap:8px}}
     #{widget_id} .rt-action-title{{font-size:16px;font-weight:800;margin-bottom:4px}}
     #{widget_id} .rt-action-meta{{font-size:14px;color:#111827;line-height:1.35}}
     #{widget_id} .rt-action-time{{font-size:12px;color:#667085;margin-top:6px}}
+    #{widget_id} .rt-promo-badge{{align-self:flex-start;border-radius:8px;background:#b42318;color:#fff;padding:7px 10px;font-size:18px;font-weight:900;letter-spacing:.04em}}
+    #{widget_id} .rt-countdown-time{{font-size:30px;line-height:1;font-weight:900;color:#b42318}}
+    #{widget_id} .rt-bundle-row{{font-weight:800;color:#166534}}
     #{widget_id} .rt-empty{{border:1px solid #d0d5dd;border-radius:8px;padding:12px;color:#667085;background:#fff}}
     @media (max-width: 900px){{#{widget_id} .rt-grid{{grid-template-columns:1fr}}}}
   </style>
@@ -733,14 +741,50 @@ def _build_realtime_audio_file_js(
         target.innerHTML = '<div class="rt-empty">No actions emitted yet.</div>';
         return;
       }}
-      target.innerHTML = items.slice(-6).map(action => `
-        <div class="rt-action-card">
-          <div class="rt-action-type">${{escapeHtml(action.action || "ACTION")}}</div>
-          <div class="rt-action-title">${{escapeHtml(action.title || humanActionTitle(action.action))}}</div>
-          <div class="rt-action-meta">${{escapeHtml(action.skus || "-")}}</div>
-          <div class="rt-action-time">${{escapeHtml(Number(action.time || 0).toFixed(2))}}s</div>
-        </div>
-      `).join("");
+      target.innerHTML = items.slice(-6).map(action => {{
+        const type = action.action || "ACTION";
+        const payload = action.displayPayload || {{}};
+        const time = `${{Number(action.time || 0).toFixed(2)}}s`;
+        if (type === "PIN_PRODUCT_CARD") {{
+          const product = payload.product || {{}};
+          return `
+            <div class="rt-action-card rt-action-pin">
+              <div class="rt-action-top"><div class="rt-action-type">${{escapeHtml(type)}}</div><div class="rt-action-time">${{time}}</div></div>
+              <div class="rt-action-title">${{escapeHtml(product.product_name || action.title || "Pin product card")}}</div>
+              <div class="rt-action-meta">THB ${{escapeHtml(product.discount_price || "")}} <span style="color:#667085">${{escapeHtml(product.brand || action.skus || "")}}</span></div>
+            </div>`;
+        }}
+        if (type === "SHOW_PROMO_CODE") {{
+          return `
+            <div class="rt-action-card rt-action-promo">
+              <div class="rt-action-top"><div class="rt-action-type">${{escapeHtml(type)}}</div><div class="rt-action-time">${{time}}</div></div>
+              <div class="rt-promo-badge">${{escapeHtml(payload.promo_code || "PROMO")}}</div>
+              <div class="rt-action-meta">${{escapeHtml(payload.promo_description || action.skus || "-")}}</div>
+            </div>`;
+        }}
+        if (type === "SHOW_BUNDLE_RECOMMENDATION") {{
+          return `
+            <div class="rt-action-card rt-action-bundle">
+              <div class="rt-action-top"><div class="rt-action-type">${{escapeHtml(type)}}</div><div class="rt-action-time">${{time}}</div></div>
+              <div class="rt-action-title">${{escapeHtml(action.title || "Recommended bundle")}}</div>
+              <div class="rt-bundle-row">${{escapeHtml(action.skus || "-")}}</div>
+            </div>`;
+        }}
+        if (type === "START_FLASH_SALE_COUNTDOWN") {{
+          return `
+            <div class="rt-action-card rt-action-countdown">
+              <div class="rt-action-top"><div class="rt-action-type">${{escapeHtml(type)}}</div><div class="rt-action-time">${{time}}</div></div>
+              <div class="rt-countdown-time">${{escapeHtml(payload.duration_minutes || 5)}} min</div>
+              <div class="rt-action-meta">${{escapeHtml(payload.promo_code || "Live deal")}}</div>
+            </div>`;
+        }}
+        return `
+          <div class="rt-action-card">
+            <div class="rt-action-top"><div class="rt-action-type">${{escapeHtml(type)}}</div><div class="rt-action-time">${{time}}</div></div>
+            <div class="rt-action-title">${{escapeHtml(action.title || humanActionTitle(type))}}</div>
+            <div class="rt-action-meta">${{escapeHtml(action.skus || "-")}}</div>
+          </div>`;
+      }}).join("");
     }};
     const updateTime = () => {{
       const total = duration();

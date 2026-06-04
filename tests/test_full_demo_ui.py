@@ -52,11 +52,14 @@ class FullDemoUiTests(unittest.TestCase):
             )
         ]
 
-        html = build_catalog_scene_html(catalog, promotions)
+        product_html = build_catalog_scene_html(catalog, promotions, view="products")
+        promo_html = build_catalog_scene_html(catalog, promotions, view="promotions")
 
-        self.assertIn("Vitamin C Serum", html)
-        self.assertIn("LIVE25", html)
-        self.assertIn("THB 299", html)
+        self.assertIn("Vitamin C Serum", product_html)
+        self.assertIn("THB 299", product_html)
+        self.assertNotIn("LIVE25", product_html)
+        self.assertIn("LIVE25", promo_html)
+        self.assertNotIn("Vitamin C Serum", promo_html)
 
     def test_session_catalog_csv_roundtrip(self) -> None:
         item = ProductCatalogItem(
