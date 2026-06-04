@@ -414,7 +414,7 @@ class FullDemoPlaybackGate:
 
 
 class FullDemoMicGate:
-    """ipywidgets-controlled mic gate for the full notebook UI."""
+    """Browser-controlled mic gate for the full notebook UI."""
 
     def __init__(self, widgets: Any, chunk_source: BrowserMicChunkSource) -> None:
         self.widgets = widgets
@@ -423,6 +423,8 @@ class FullDemoMicGate:
         self._recording = False
         self._started_once = False
         self._stopped = False
+        self._state = "ready"
+        self._detail = "Press Start to open the browser mic."
         self.widget_id = f"full-demo-mic-{uuid.uuid4().hex}"
         self.caption_id = f"{self.widget_id}-caption"
         self._latest_caption = "Waiting for live transcript..."
@@ -439,15 +441,10 @@ class FullDemoMicGate:
             self._action_rail_html(),
             layout=widgets.Layout(width="100%"),
         )
-        self.toggle_button = widgets.Button(
-            description="",
-            icon="microphone",
-            button_style="danger",
-            tooltip="Enable mic",
-            layout=widgets.Layout(width="54px", height="42px"),
+        self.controls_html = widgets.HTML(
+            self._controls_html(),
+            layout=widgets.Layout(width="54px"),
         )
-        self.toggle_button.disabled = True
-        self.toggle_button.on_click(lambda _button: self.toggle())
         self.ui = widgets.VBox(
             [
                 widgets.HBox(
@@ -456,7 +453,7 @@ class FullDemoMicGate:
                             [
                                 self.video_html,
                                 widgets.HBox(
-                                    [self.toggle_button, self.progress_html],
+                                    [self.controls_html, self.progress_html],
                                     layout=widgets.Layout(
                                         align_items="center",
                                         gap="10px",
@@ -482,6 +479,20 @@ class FullDemoMicGate:
             layout=widgets.Layout(width="100%"),
         )
         self.publish("ready", "Press Start to open the browser mic.")
+
+    def install(self) -> None:
+        script = self._gate_js()
+        try:
+            from google.colab import output  # type: ignore
+
+            output.eval_js(script)
+        except Exception:
+            try:
+                from IPython.display import Javascript, display  # type: ignore
+
+                display(Javascript(script))
+            except Exception:
+                pass
 
     def toggle(self) -> None:
         if self._recording:
@@ -515,6 +526,8 @@ class FullDemoMicGate:
         self.publish("stopped", "Input stopped. Queued chunks may still finish processing.")
 
     def publish(self, state: str, detail: str) -> None:
+        self._state = state
+        self._detail = detail
         if state == "ready":
             self._ready = True
         elif state in {"loading_asr", "stopped"}:
@@ -522,6 +535,7 @@ class FullDemoMicGate:
         self._eval_caption_js(self._latest_caption)
         self.actions_html.value = self._action_rail_html()
         self._render_toggle()
+        self._publish_browser_state()
 
     def update_results(
         self,
@@ -545,13 +559,6 @@ class FullDemoMicGate:
         self._eval_caption_js(self._latest_caption)
 
     def _render_toggle(self) -> None:
-        if self._recording:
-            self.toggle_button.icon = "pause"
-            self.toggle_button.tooltip = "Pause mic input"
-        else:
-            self.toggle_button.icon = "microphone"
-            self.toggle_button.tooltip = "Enable or resume mic input"
-        self.toggle_button.disabled = self._stopped or not self._ready
         self.progress_html.value = self._progress_html()
 
     def _video_html(self) -> str:
@@ -570,7 +577,19 @@ class FullDemoMicGate:
 
     def _progress_html(self) -> str:
         width = "100%" if self._recording else "0%"
-        return f'<div class="lc-progress-bar lc-inline-progress"><div style="width:{width}"></div></div>'
+        return (
+            f'<div class="lc-progress-bar lc-inline-progress">'
+            f'<div id="{html.escape(self.widget_id)}-progress" style="width:{width}"></div>'
+            "</div>"
+        )
+
+    def _controls_html(self) -> str:
+        return (
+            f'<div id="{html.escape(self.widget_id)}" class="lc-live-mic-controls">'
+            '<button class="lc-live-toggle" data-role="toggle" disabled '
+            'title="Enable mic input" aria-label="Enable mic input">&#9654;</button>'
+            "</div>"
+        )
 
     def _action_rail_html(self) -> str:
         return (
@@ -600,6 +619,171 @@ class FullDemoMicGate:
                 display(Javascript(script))
             except Exception:
                 pass
+
+    def _publish_browser_state(self) -> None:
+        payload = {
+            "state": self._state,
+            "detail": self._detail,
+            "ready": self._ready,
+            "recording": self._recording,
+            "stopped": self._stopped,
+        }
+        script = (
+            "window.fullDemoMicGate && "
+            f"window.fullDemoMicGate[{json.dumps(self.widget_id)}] && "
+            f"window.fullDemoMicGate[{json.dumps(self.widget_id)}].publish("
+            f"{json.dumps(payload)}"
+            ")"
+        )
+        try:
+            from google.colab import output  # type: ignore
+
+            output.eval_js(script)
+        except Exception:
+            try:
+                from IPython.display import Javascript, display  # type: ignore
+
+                display(Javascript(script))
+            except Exception:
+                pass
+
+    def _gate_js(self) -> str:
+        config = self.chunk_source.config
+        callbacks = self.chunk_source.callbacks
+        callback_config = {
+            "maxMilliseconds": max(500, int(float(config.chunk_seconds) * 1000)),
+            "minMilliseconds": max(200, int(float(config.min_chunk_seconds) * 1000)),
+            "silenceMilliseconds": max(100, int(float(config.pause_seconds) * 1000)),
+            "silenceThreshold": float(config.silence_threshold),
+            "maxChunks": None
+            if config.max_chunks is None
+            else max(1, int(config.max_chunks)),
+            "maxQueueChunks": max(1, int(config.max_queue_chunks)),
+        }
+        initial_state = {
+            "state": self._state,
+            "detail": self._detail,
+            "ready": self._ready,
+            "recording": self._recording,
+            "stopped": self._stopped,
+        }
+        return f"""
+(() => {{
+  const widgetId = {json.dumps(self.widget_id)};
+  const callbacks = {json.dumps(callbacks)};
+  const config = {json.dumps(callback_config)};
+  const initialState = {json.dumps(initial_state)};
+  const install = (attempt = 0) => {{
+    const root = document.getElementById(widgetId);
+    if (!root) {{
+      if (attempt < 100) window.setTimeout(() => install(attempt + 1), 100);
+      return;
+    }}
+    const button = root.querySelector('[data-role="toggle"]');
+    const progress = document.getElementById(`${{widgetId}}-progress`);
+    const apiRoot = window.fullDemoMicGate = window.fullDemoMicGate || {{}};
+    if (root.dataset.fullDemoMicBound === "1" && apiRoot[widgetId]) {{
+      apiRoot[widgetId].publish(initialState);
+      return;
+    }}
+    root.dataset.fullDemoMicBound = "1";
+    const mic = () => window.liveCommerceMic || null;
+    let ready = false;
+    let recording = false;
+    let paused = false;
+    let stopped = false;
+    const setVisual = () => {{
+      if (!button) return;
+      button.innerHTML = recording ? "&#10073;&#10073;" : "&#9654;";
+      button.title = recording ? "Pause mic input" : "Enable or resume mic input";
+      button.setAttribute("aria-label", button.title);
+      button.disabled = stopped || !ready;
+      if (progress) progress.style.width = recording ? "100%" : "0%";
+    }};
+    const emit = (name, payload) => {{
+      const state = mic();
+      if (state && typeof state.emitCallback === "function") {{
+        state.emitCallback(name, payload || {{}});
+      }}
+    }};
+    const startMic = () => {{
+      if (!ready || stopped || recording) return;
+      const state = mic();
+      if (!state || typeof state.startBufferedRecording !== "function") return;
+      recording = true;
+      paused = false;
+      state.startRequested = true;
+      state.stopRequested = false;
+      state.pauseRequested = false;
+      emit(callbacks.start, {{started: true}});
+      if (typeof state.resolveStart === "function") {{
+        state.resolveStart(true);
+        state.resolveStart = null;
+      }}
+      setVisual();
+      if (state.bufferLoopActive) {{
+        if (typeof state.resume === "function") state.resume();
+        return;
+      }}
+      state.startBufferedRecording(
+        config.maxMilliseconds,
+        config.minMilliseconds,
+        config.silenceMilliseconds,
+        config.silenceThreshold,
+        config.maxChunks,
+        config.maxQueueChunks,
+        callbacks.chunk,
+        callbacks.done,
+        callbacks.error
+      ).then(result => {{
+        if (!result || !result.started) {{
+          recording = false;
+          paused = false;
+          setVisual();
+          const reason = result && result.reason ? result.reason : "mic_not_started";
+          emit(callbacks.error, {{error: reason}});
+        }}
+      }}).catch(error => {{
+        recording = false;
+        paused = false;
+        setVisual();
+        emit(callbacks.error, {{error: error && (error.message || String(error))}});
+      }});
+    }};
+    const pauseMic = () => {{
+      if (!recording) return;
+      const state = mic();
+      recording = false;
+      paused = true;
+      if (state && typeof state.pause === "function") state.pause();
+      setVisual();
+    }};
+    if (button && !button.dataset.bound) {{
+      button.dataset.bound = "1";
+      button.addEventListener("click", () => {{
+        if (recording) pauseMic();
+        else startMic();
+      }});
+    }}
+    apiRoot[widgetId] = {{
+      publish(payload) {{
+        const state = payload || {{}};
+        ready = Boolean(state.ready);
+        stopped = Boolean(state.stopped) || state.state === "stopped";
+        if (state.state === "loading_asr") ready = false;
+        if (state.state === "ready") ready = true;
+        if (state.state === "stopped") {{
+          recording = false;
+          paused = false;
+        }}
+        setVisual();
+      }}
+    }};
+    apiRoot[widgetId].publish(initialState);
+  }};
+  install();
+}})();
+"""
 
 
 def display_full_demo_ui(repo_root: Path = REPO_ROOT) -> None:
@@ -1127,11 +1311,12 @@ def display_full_demo_ui(repo_root: Path = REPO_ROOT) -> None:
                 mic_source = BrowserMicChunkSource(config)
                 mic_source.install_recorder()
                 mic_gate = FullDemoMicGate(widgets, mic_source)
+                display(mic_gate.ui)
+                mic_gate.install()
                 mic_gate.publish(
                     "loading_asr",
                     "Preparing OpenAI Whisper turbo. Mic input will unlock when ASR is ready.",
                 )
-                display(mic_gate.ui)
                 state["active_stop"] = mic_gate.stop
             except Exception as exc:
                 print(f"Browser mic controls unavailable: {exc}")
@@ -2060,6 +2245,9 @@ def _style_block() -> str:
 .lc-progress-bar{height:10px;border-radius:999px;overflow:hidden;background:#f2f4f7;margin-top:10px}
 .lc-progress-bar div{height:100%;width:0%;background:#b42318}
 .lc-inline-progress{width:100%;margin-top:0}
+.lc-live-mic-controls{width:54px;height:42px}
+.lc-live-toggle{width:54px;height:42px;border:0;border-radius:8px;background:#b42318;color:#fff;font-size:17px;font-weight:900;cursor:pointer;display:flex;align-items:center;justify-content:center}
+.lc-live-toggle:disabled{opacity:.5;cursor:not-allowed}
 .lc-processing-panel .lc-progress-bar div{width:42%;animation:lc-progress-sweep 1.15s ease-in-out infinite}
 @keyframes lc-progress-sweep{0%{transform:translateX(-120%)}100%{transform:translateX(260%)}}
 .lc-action-rail{min-height:390px;color:#111827}
