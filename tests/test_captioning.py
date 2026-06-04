@@ -30,6 +30,7 @@ from src.utils.realtime_audio_file import (
     run_realtime_audio_file_demo,
     write_audio_window_wav,
 )
+from src.utils.live_mic import LiveMicDemoConfig, _is_silent_mic_payload
 from src.utils.realtime_caption import build_realtime_caption_html
 
 
@@ -383,8 +384,8 @@ class CaptioningTests(unittest.TestCase):
         gate = FakePlaybackGate()
         asr = FakeAsr(gate)
         windows = [
-            AudioWindow(0.0, 2.0, np.zeros(32, dtype=np.float32), 16_000),
-            AudioWindow(2.0, 4.0, np.zeros(32, dtype=np.float32), 16_000),
+            AudioWindow(0.0, 2.0, np.ones(32, dtype=np.float32) * 0.2, 16_000),
+            AudioWindow(2.0, 4.0, np.ones(32, dtype=np.float32) * 0.2, 16_000),
         ]
         with tempfile.TemporaryDirectory() as temp_dir:
             summary = run_realtime_audio_file_demo(
@@ -407,6 +408,85 @@ class CaptioningTests(unittest.TestCase):
             self.assertTrue(all(exists for _, _, exists in asr.calls))
             self.assertEqual(summary["processed_chunks"], 2)
             self.assertTrue((Path(temp_dir) / "realtime_file_captions.json").exists())
+
+    def test_realtime_audio_file_skips_silent_chunks_before_asr(self) -> None:
+        import numpy as np
+
+        class FakePlaybackGate:
+            def __init__(self) -> None:
+                self.current_time = 0.0
+                self.published = []
+
+            def install(self) -> None:
+                pass
+
+            def wait_for_start(self):
+                return {"currentTime": self.current_time}
+
+            def wait_until(self, target_seconds):
+                self.current_time = float(target_seconds)
+                return {"currentTime": self.current_time}
+
+            def publish(self, payload):
+                self.published.append(dict(payload))
+
+        class FakeAsr:
+            def __init__(self) -> None:
+                self.calls = []
+
+            def transcribe_chunk(self, chunk_path, offset_seconds, fallback_duration_seconds):
+                self.calls.append((chunk_path, offset_seconds, fallback_duration_seconds))
+                return []
+
+        gate = FakePlaybackGate()
+        asr = FakeAsr()
+        windows = [
+            AudioWindow(0.0, 2.0, np.zeros(160, dtype=np.float32), 16_000),
+        ]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            summary = run_realtime_audio_file_demo(
+                RealtimeAudioFileDemoConfig(
+                    audio_path=REPO_ROOT / "data" / "demo" / "audio" / "1.mp3",
+                    output_dir=Path(temp_dir),
+                    catalog_path=REPO_ROOT / "data" / "demo" / "product_catalog.csv",
+                    promotions_path=REPO_ROOT / "data" / "demo" / "promotions.csv",
+                ),
+                playback_gate=gate,
+                asr=asr,
+                windows=windows,
+            )
+
+            self.assertEqual(asr.calls, [])
+            self.assertEqual(summary["processed_chunks"], 1)
+            self.assertEqual(summary["skipped_chunks"], 1)
+            self.assertTrue(
+                any(item.get("state") == "skipped_silence" for item in gate.published)
+            )
+
+    def test_live_mic_silence_payload_is_skipped(self) -> None:
+        config = LiveMicDemoConfig(silence_threshold=0.015)
+        self.assertTrue(
+            _is_silent_mic_payload(
+                {
+                    "speechDetected": False,
+                    "maxRms": 0.001,
+                    "meanRms": 0.0004,
+                    "silenceThreshold": 0.015,
+                },
+                config,
+            )
+        )
+        self.assertFalse(
+            _is_silent_mic_payload(
+                {
+                    "speechDetected": True,
+                    "maxRms": 0.03,
+                    "meanRms": 0.011,
+                    "silenceThreshold": 0.015,
+                },
+                config,
+            )
+        )
 
     def test_browser_playback_gate_wait_until_uses_python_clock(self) -> None:
         import numpy as np

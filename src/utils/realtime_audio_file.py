@@ -25,6 +25,7 @@ from src.ai.decision import CommerceDecisionProvider
 from src.data.catalog import load_product_catalog, load_promotions
 from src.schemas import CaptionResult, CaptionSegment
 from src.ai.captioning import save_caption_json
+from src.utils.live_display import display_stream_state_panel
 
 
 @dataclass(frozen=True)
@@ -293,6 +294,7 @@ def run_realtime_audio_file_demo(
             "caption_count": 0,
             "action_count": 0,
             "processed_chunks": 0,
+            "skipped_chunks": 0,
             "max_backlog_chunks": 0,
             "stopped": True,
             "audio_path": str(config.audio_path),
@@ -329,8 +331,10 @@ def run_realtime_audio_file_demo(
     live_segments: List[CaptionSegment] = []
     live_actions = []
     processed_chunks = 0
+    skipped_chunks = 0
     max_backlog = 0
     stopped_by_user = False
+    display_key = f"realtime_audio_file_stream_panel_{uuid.uuid4().hex}"
 
     for index, window in enumerate(audio_windows, start=1):
         if cancel_event and cancel_event.is_set():
@@ -366,6 +370,52 @@ def run_realtime_audio_file_demo(
         released = sum(1 for item in audio_windows if item.end <= current_time)
         backlog = max(0, released - processed_chunks - 1)
         max_backlog = max(max_backlog, backlog)
+
+        audio_stats = _audio_window_stats(window.samples)
+        if _is_silent_audio_chunk(audio_stats, config.silence_threshold):
+            processed_chunks += 1
+            skipped_chunks += 1
+            caption_result = CaptionResult(
+                language=config.language,
+                segments=live_segments,
+                duration_seconds=max(window.end, current_time),
+            )
+            save_caption_json(caption_result, captions_path)
+            save_commerce_actions(live_actions, actions_path)
+            _display_realtime_file_state(
+                index=index,
+                total=len(audio_windows),
+                window=window,
+                chunk_path=None,
+                current_time=current_time,
+                queue_depth=backlog,
+                segments=live_segments,
+                actions=live_actions,
+                state_label="Skipped Silence",
+                detail="This chunk was below the silence threshold, so ASR and action generation were skipped.",
+                audio_stats=audio_stats,
+                skipped_chunks=skipped_chunks,
+                display_key=display_key,
+            )
+            gate.publish(
+                {
+                    "state": "skipped_silence",
+                    "status": "below_silence_threshold",
+                    "chunkIndex": index,
+                    "chunkStart": window.start,
+                    "chunkEnd": window.end,
+                    "playbackTime": current_time,
+                    "queueDepth": backlog,
+                    "processedChunks": processed_chunks,
+                    "skippedChunks": skipped_chunks,
+                    "totalChunks": len(audio_windows),
+                    "captionCount": len(live_segments),
+                    "actionCount": len(live_actions),
+                    "rms": audio_stats["rms"],
+                    "peak": audio_stats["peak"],
+                }
+            )
+            continue
 
         chunk_path = chunk_dir / f"file_chunk_{index - 1:03d}.wav"
         write_audio_window_wav(window, chunk_path)
@@ -415,6 +465,10 @@ def run_realtime_audio_file_demo(
             queue_depth=backlog,
             segments=live_segments,
             actions=live_actions,
+            state_label="Transcribing",
+            audio_stats=audio_stats,
+            skipped_chunks=skipped_chunks,
+            display_key=display_key,
         )
         gate.publish(
             {
@@ -426,6 +480,7 @@ def run_realtime_audio_file_demo(
                 "playbackTime": current_time,
                 "queueDepth": backlog,
                 "processedChunks": processed_chunks,
+                "skippedChunks": skipped_chunks,
                 "totalChunks": len(audio_windows),
                 "captionCount": len(live_segments),
                 "actionCount": len(live_actions),
@@ -436,6 +491,7 @@ def run_realtime_audio_file_demo(
         "caption_count": len(live_segments),
         "action_count": len(live_actions),
         "processed_chunks": processed_chunks,
+        "skipped_chunks": skipped_chunks,
         "max_backlog_chunks": max_backlog,
         "stopped": stopped_by_user,
         "audio_path": str(config.audio_path),
@@ -460,6 +516,38 @@ def write_audio_window_wav(window: AudioWindow, path: Path) -> None:
         handle.setsampwidth(2)
         handle.setframerate(int(window.sample_rate))
         handle.writeframes(pcm.tobytes())
+
+
+def _audio_window_stats(samples: Any) -> Dict[str, float]:
+    try:
+        import numpy as np  # type: ignore
+
+        values = np.asarray(samples, dtype=np.float32)
+        if values.size == 0:
+            return {"rms": 0.0, "peak": 0.0}
+        return {
+            "rms": float(np.sqrt(np.mean(np.square(values)))),
+            "peak": float(np.max(np.abs(values))),
+        }
+    except Exception:
+        values = [float(value) for value in samples] if samples is not None else []
+        if not values:
+            return {"rms": 0.0, "peak": 0.0}
+        square_mean = sum(value * value for value in values) / len(values)
+        return {
+            "rms": square_mean**0.5,
+            "peak": max(abs(value) for value in values),
+        }
+
+
+def _is_silent_audio_chunk(stats: Dict[str, float], silence_threshold: float) -> bool:
+    threshold = max(0.0, float(silence_threshold))
+    if threshold <= 0:
+        return False
+    return (
+        float(stats.get("peak") or 0.0) < threshold
+        and float(stats.get("rms") or 0.0) < threshold * 0.5
+    )
 
 
 def _load_audio_windows(config: RealtimeAudioFileDemoConfig) -> List[AudioWindow]:
@@ -814,20 +902,18 @@ def _display_realtime_file_state(
     index: int,
     total: int,
     window: AudioWindow,
-    chunk_path: Path,
+    chunk_path: Optional[Path],
     current_time: float,
     queue_depth: int,
     segments: Sequence[CaptionSegment],
     actions: Sequence[Any],
+    state_label: str = "Transcribing",
+    detail: Optional[str] = None,
+    audio_stats: Optional[Dict[str, float]] = None,
+    skipped_chunks: int = 0,
+    display_key: Optional[str] = None,
 ) -> None:
-    print(
-        f"Realtime file chunk {index}/{total} released at {window.end:.2f}s "
-        f"(playback {current_time:.2f}s), saved to {chunk_path}"
-    )
-    print(
-        f"Buffered chunks waiting: {queue_depth} | "
-        f"Captions: {len(segments)} | Actions: {len(actions)}"
-    )
+    audio_stats = audio_stats or {"rms": None, "peak": None}
     caption_rows = [
         {
             "start": round(segment.start, 2),
@@ -846,15 +932,26 @@ def _display_realtime_file_state(
         }
         for action in actions[-8:]
     ]
-    try:
-        from IPython.display import display  # type: ignore
-    except ImportError:
-        return
-
-    try:
-        import pandas as pd  # type: ignore
-
-        display(pd.DataFrame(caption_rows))
-        display(pd.DataFrame(action_rows))
-    except Exception:
-        display({"captions": caption_rows, "actions": action_rows})
+    metrics = {
+        "Chunk": f"{index}/{total}",
+        "Playback": f"{current_time:.2f}s",
+        "Window": f"{window.start:.2f}-{window.end:.2f}s",
+        "Queue": queue_depth,
+        "Captions": len(segments),
+        "Actions": len(actions),
+        "Skipped": skipped_chunks,
+        "RMS": audio_stats.get("rms"),
+        "Peak": audio_stats.get("peak"),
+    }
+    if chunk_path is not None:
+        metrics["Chunk file"] = chunk_path.name
+    display_stream_state_panel(
+        title="Real-Time Audio File Stream",
+        state_label=state_label,
+        metrics=metrics,
+        captions=caption_rows,
+        actions=action_rows,
+        detail=detail,
+        accent="#a33b2f" if "Skip" not in state_label else "#b45309",
+        display_key=display_key or "realtime_audio_file_stream_panel",
+    )

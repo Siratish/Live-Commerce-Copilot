@@ -24,6 +24,7 @@ from src.ai.commerce_actions import generate_commerce_actions, save_commerce_act
 from src.ai.decision import CommerceDecisionProvider
 from src.data.catalog import load_product_catalog, load_promotions
 from src.schemas import CaptionResult, CaptionSegment, repair_caption_timestamps
+from src.utils.live_display import display_stream_state_panel
 
 
 @dataclass(frozen=True)
@@ -318,6 +319,8 @@ def run_colab_live_mic_demo(
     live_actions = []
     elapsed_seconds = 0.0
     processed_chunks = 0
+    skipped_chunks = 0
+    display_key = f"live_mic_stream_panel_{uuid.uuid4().hex}"
     buffer_status: Dict[str, Any] = {}
 
     try:
@@ -361,6 +364,7 @@ def run_colab_live_mic_demo(
                     live_actions,
                     elapsed_seconds,
                     chunk_path,
+                    skipped,
                 ) = _process_live_mic_payload(
                     payload=payload,
                     chunk_number=chunk_number,
@@ -372,17 +376,21 @@ def run_colab_live_mic_demo(
                     decision_provider=decision_provider,
                     live_segments=live_segments,
                     elapsed_seconds=elapsed_seconds,
+                    display_key=display_key,
                 )
+                if skipped:
+                    skipped_chunks += 1
                 if cancel_event and cancel_event.is_set():
                     break
                 _publish_colab_mic_debug(
                     {
                         "chunkIndex": chunk_number,
                         "state": "completed",
-                        "status": "asr_done",
+                        "status": "silence_skipped" if skipped else "asr_done",
                         "durationSeconds": payload.get("durationSeconds"),
                         "captionCount": len(live_segments),
                         "actionCount": len(live_actions),
+                        "skippedChunks": skipped_chunks,
                         "queueDepth": payload.get("queueDepth"),
                         "droppedChunks": payload.get("droppedChunks"),
                     }
@@ -407,6 +415,7 @@ def run_colab_live_mic_demo(
                     live_actions,
                     elapsed_seconds,
                     chunk_path,
+                    skipped,
                 ) = _process_live_mic_payload(
                     payload=payload,
                     chunk_number=chunk_index + 1,
@@ -418,15 +427,19 @@ def run_colab_live_mic_demo(
                     decision_provider=decision_provider,
                     live_segments=live_segments,
                     elapsed_seconds=elapsed_seconds,
+                    display_key=display_key,
                 )
+                if skipped:
+                    skipped_chunks += 1
                 _publish_colab_mic_debug(
                     {
                         "chunkIndex": chunk_index + 1,
                         "state": "completed",
-                        "status": "asr_done",
+                        "status": "silence_skipped" if skipped else "asr_done",
                         "durationSeconds": payload.get("durationSeconds"),
                         "captionCount": len(live_segments),
                         "actionCount": len(live_actions),
+                        "skippedChunks": skipped_chunks,
                     }
                 )
     finally:
@@ -442,6 +455,7 @@ def run_colab_live_mic_demo(
         "caption_count": len(live_segments),
         "action_count": len(live_actions),
         "processed_chunks": processed_chunks,
+        "skipped_chunks": skipped_chunks,
         "dropped_chunks": buffer_status.get("droppedChunks", 0),
         "captions_json": str(config.output_dir / "live_mic_captions.json"),
         "actions_json": str(config.output_dir / "live_mic_actions.json"),
@@ -460,15 +474,63 @@ def _process_live_mic_payload(
     decision_provider: Optional[CommerceDecisionProvider],
     live_segments: Sequence[CaptionSegment],
     elapsed_seconds: float,
-) -> tuple[List[CaptionSegment], List[Any], float, Path]:
+    display_key: Optional[str] = None,
+) -> tuple[List[CaptionSegment], List[Any], float, Optional[Path], bool]:
     duration_seconds = float(payload.get("durationSeconds") or config.chunk_seconds)
     chunk_path = chunk_dir / f"mic_chunk_{max(0, chunk_number - 1):03d}.webm"
-    _write_data_url(payload["dataUrl"], chunk_path)
-
     offset_raw = payload.get("sessionOffsetSeconds")
     offset_seconds = (
         elapsed_seconds if offset_raw is None else max(0.0, float(offset_raw))
     )
+    audio_stats = _mic_payload_audio_stats(payload)
+    if _is_silent_mic_payload(payload, config):
+        next_elapsed_seconds = max(elapsed_seconds, offset_seconds + duration_seconds)
+        repaired_segments = list(live_segments)
+        caption_result = CaptionResult(
+            language=config.language,
+            segments=repaired_segments,
+            duration_seconds=next_elapsed_seconds,
+        )
+        live_actions = generate_commerce_actions(
+            caption_result,
+            catalog,
+            promotions,
+            decision_provider=decision_provider,
+        )
+        save_caption_json(caption_result, config.output_dir / "live_mic_captions.json")
+        save_commerce_actions(live_actions, config.output_dir / "live_mic_actions.json")
+        _publish_colab_mic_debug(
+            {
+                "chunkIndex": chunk_number,
+                "state": "skipped_silence",
+                "status": "below_silence_threshold",
+                "durationSeconds": duration_seconds,
+                "size": payload.get("size"),
+                "queueDepth": payload.get("queueDepth"),
+                "droppedChunks": payload.get("droppedChunks"),
+                "maxRms": audio_stats.get("maxRms"),
+                "meanRms": audio_stats.get("meanRms"),
+                "speechDetected": audio_stats.get("speechDetected"),
+            }
+        )
+        _display_live_state(
+            chunk_index=chunk_number - 1,
+            config=config,
+            segments=repaired_segments,
+            actions=live_actions,
+            chunk_path=None,
+            queue_status={
+                "queueDepth": payload.get("queueDepth"),
+                "droppedChunks": payload.get("droppedChunks"),
+            },
+            state_label="Skipped Silence",
+            detail="This mic chunk did not contain detected speech, so ASR and action generation were skipped.",
+            audio_stats=audio_stats,
+            display_key=display_key,
+        )
+        return repaired_segments, live_actions, next_elapsed_seconds, None, True
+
+    _write_data_url(payload["dataUrl"], chunk_path)
     _publish_colab_mic_debug(
         {
             "chunkIndex": chunk_number,
@@ -478,6 +540,9 @@ def _process_live_mic_payload(
             "size": payload.get("size"),
             "queueDepth": payload.get("queueDepth"),
             "droppedChunks": payload.get("droppedChunks"),
+            "maxRms": audio_stats.get("maxRms"),
+            "meanRms": audio_stats.get("meanRms"),
+            "speechDetected": audio_stats.get("speechDetected"),
         }
     )
 
@@ -511,8 +576,46 @@ def _process_live_mic_payload(
             "queueDepth": payload.get("queueDepth"),
             "droppedChunks": payload.get("droppedChunks"),
         },
+        state_label="Transcribing",
+        audio_stats=audio_stats,
+        display_key=display_key,
     )
-    return repaired_segments, live_actions, next_elapsed_seconds, chunk_path
+    return repaired_segments, live_actions, next_elapsed_seconds, chunk_path, False
+
+
+def _mic_payload_audio_stats(payload: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "maxRms": _optional_float(payload.get("maxRms")),
+        "meanRms": _optional_float(payload.get("meanRms")),
+        "speechDetected": payload.get("speechDetected"),
+        "silenceThreshold": _optional_float(payload.get("silenceThreshold")),
+    }
+
+
+def _is_silent_mic_payload(payload: Dict[str, Any], config: LiveMicDemoConfig) -> bool:
+    if "speechDetected" not in payload and "maxRms" not in payload:
+        return False
+    stats = _mic_payload_audio_stats(payload)
+    threshold = max(0.0, float(stats.get("silenceThreshold") or config.silence_threshold))
+    max_rms = float(stats.get("maxRms") or 0.0)
+    mean_rms = float(stats.get("meanRms") or 0.0)
+    speech_detected = bool(stats.get("speechDetected"))
+    if threshold <= 0:
+        return False
+    return (
+        not speech_detected
+        and max_rms < threshold
+        and mean_rms < threshold * 0.5
+    )
+
+
+def _optional_float(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _install_asr_dependencies(install: bool) -> None:
@@ -604,6 +707,10 @@ def _install_colab_mic_recorder() -> None:
                   let stopped = false;
                   let lastSpeechAt = startedAt;
                   let stopReason = null;
+                  let maxRms = 0;
+                  let rmsTotal = 0;
+                  let rmsFrames = 0;
+                  let speechDetected = false;
                   const stopRecorder = (reason) => {
                     if (!stopped && recorder.state !== 'inactive') {
                       stopped = true;
@@ -621,7 +728,13 @@ def _install_colab_mic_recorder() -> None:
                     }
                     const rms = Math.sqrt(sumSquares / waveform.length);
                     const isSilence = rms < silenceThreshold;
-                    if (!isSilence) lastSpeechAt = now;
+                    maxRms = Math.max(maxRms, rms);
+                    rmsTotal += rms;
+                    rmsFrames += 1;
+                    if (!isSilence) {
+                      lastSpeechAt = now;
+                      speechDetected = true;
+                    }
                     const elapsed = now - startedAt;
                     const silenceFor = now - lastSpeechAt;
                     state.publishDebug({
@@ -665,7 +778,11 @@ def _install_colab_mic_recorder() -> None:
                       status: stopReason || 'stopped',
                       elapsedSeconds: (stoppedAt - startedAt) / 1000,
                       durationSeconds: (stoppedAt - startedAt) / 1000,
-                      size: blob.size
+                      size: blob.size,
+                      maxRms,
+                      meanRms: rmsFrames ? rmsTotal / rmsFrames : 0,
+                      speechDetected,
+                      silenceThreshold
                     });
                     const reader = new FileReader();
                     reader.onloadend = () => resolve({
@@ -677,6 +794,10 @@ def _install_colab_mic_recorder() -> None:
                       durationSeconds: (stoppedAt - startedAt) / 1000,
                       startedAtMs: startedAt,
                       stoppedAtMs: stoppedAt,
+                      maxRms,
+                      meanRms: rmsFrames ? rmsTotal / rmsFrames : 0,
+                      speechDetected,
+                      silenceThreshold,
                       sessionOffsetSeconds: state.bufferSessionStartedAt
                         ? (startedAt - state.bufferSessionStartedAt) / 1000
                         : null
@@ -1201,23 +1322,16 @@ def _display_live_state(
     config: LiveMicDemoConfig,
     segments: Sequence[CaptionSegment],
     actions: Sequence[Any],
-    chunk_path: Path,
+    chunk_path: Optional[Path],
     queue_status: Optional[Dict[str, Any]] = None,
+    state_label: str = "Transcribing",
+    detail: Optional[str] = None,
+    audio_stats: Optional[Dict[str, Any]] = None,
+    display_key: Optional[str] = None,
 ) -> None:
-    from IPython.display import display  # type: ignore
-
     max_chunks_label = "open" if config.max_chunks is None else str(config.max_chunks)
-    print(
-        f"Live mic utterance {chunk_index + 1}/{max_chunks_label} saved to {chunk_path}"
-    )
-    print(f"Captions: {len(segments)} | Actions: {len(actions)}")
-    if queue_status and queue_status.get("queueDepth") is not None:
-        print(
-            "Buffered chunks waiting: "
-            f"{queue_status.get('queueDepth')} | Dropped chunks: "
-            f"{queue_status.get('droppedChunks') or 0}"
-        )
-
+    queue_status = queue_status or {}
+    audio_stats = audio_stats or {}
     caption_rows = [
         {
             "start": round(segment.start, 2),
@@ -1236,11 +1350,25 @@ def _display_live_state(
         }
         for action in actions[-8:]
     ]
-
-    try:
-        import pandas as pd  # type: ignore
-
-        display(pd.DataFrame(caption_rows))
-        display(pd.DataFrame(action_rows))
-    except Exception:
-        display({"captions": caption_rows, "actions": action_rows})
+    metrics = {
+        "Chunk": f"{chunk_index + 1}/{max_chunks_label}",
+        "Captions": len(segments),
+        "Actions": len(actions),
+        "Queue": queue_status.get("queueDepth"),
+        "Dropped": queue_status.get("droppedChunks") or 0,
+        "Max RMS": audio_stats.get("maxRms"),
+        "Mean RMS": audio_stats.get("meanRms"),
+        "Speech": audio_stats.get("speechDetected"),
+    }
+    if chunk_path is not None:
+        metrics["Chunk file"] = chunk_path.name
+    display_stream_state_panel(
+        title="Live Mic ASR + Commerce Actions",
+        state_label=state_label,
+        metrics=metrics,
+        captions=caption_rows,
+        actions=action_rows,
+        detail=detail,
+        accent="#a33b2f" if "Skip" not in state_label else "#b45309",
+        display_key=display_key or "live_mic_stream_panel",
+    )
