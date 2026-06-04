@@ -1,0 +1,76 @@
+{
+  "language": "th",
+  "duration_seconds": 80.48,
+  "segments": [
+    {
+      "start": 0.0,
+      "end": 6.16,
+      "text": "สวัสดีครับทุกคน วันนี้เราอยู่กับ True ID Tech Live Deal สำหรับคนที่ใช้มือถือทุกวันนะครับ",
+      "source": "openai_whisper",
+      "confidence": null
+    },
+    {
+      "start": 6.16,
+      "end": 14.64,
+      "text": "สินค้าตัวแรกคือ Fast Charge Power Bank 1 000-0-0-0-0-MH จาก Demotech ปกติราคา 799 บาท",
+      "source": "openai_whisper",
+      "confidence": null
+    },
+    {
+      "start": 14.64,
+      "end": 21.92,
+      "text": "วันนี้ลดเหลือ 599 บาท ตัวนี้รองรับ Fast Charging และมีพอร์ต USB-C เหมาะสำหรับคนที่เดินทางบ่อย",
+      "source": "openai_whisper",
+      "confidence": null
+    },
+    {
+      "start": 21.92,
+      "end": 29.84,
+      "text": "หรือดูวิดีโอบนมือถือเป็นเวลานานครับ ใช้โคตรเทกส 1 000-0-0-0-0-100 บาท เมื่อซื้อผ่าน Live นี้นะครับ",
+      "source": "openai_whisper",
+      "confidence": null
+    },
+    {
+      "start": 29.84,
+      "end": 36.88,
+      "text": "กดที่ Product Card ได้เลย เดี๋ยวผมขอแก้ไขนิดนึงนะครับ เมื่อกี้ผมพูดว่าแถมใส่ชาร์จ แต่จริงๆ รุ่นนี้ไม่ได้แถมใส่ชาร์จนะครับ",
+      "source": "openai_whisper",
+      "confidence": null
+    },
+    {
+      "start": 36.88,
+      "end": 49.32,
+      "text": "ในกล่องมีเฉพาะ Power Bank และคู่มือการใช้งานครับ ต่อไปเป็น Wireless Earbuds Lite จาก Demo Sound ราคาเต็ม 1,290 บาท วันนี้ลดเหลือ 990 บาท",
+      "source": "openai_whisper",
+      "confidence": null
+    },
+    {
+      "start": 49.32,
+      "end": 56.0,
+      "text": "ตัวนี้เหมาะสำหรับฟังเพลงดูซีรีย์ และใช้ประชุมออนไลน์ มี Low Latency Mode ด้วยนะครับ",
+      "source": "openai_whisper",
+      "confidence": null
+    },
+    {
+      "start": 56.0,
+      "end": 66.08,
+      "text": "ถ้าใครถามว่าตัวนี้ใช้กับ iPhone ได้ไหม จากข้อมูลสินค้ารองรับ Bluetooth 5.3 และใช้ได้กับมือถือที่รองรับ Bluetooth ทั่วไปครับ",
+      "source": "openai_whisper",
+      "confidence": null
+    },
+    {
+      "start": 66.08,
+      "end": 71.36,
+      "text": "ตัวนี้เหลือสตอคไม่เยอะนะครับ ถ้าสนใจ Earbuds ตัวนี้แนะนำให้กดใส่ตะกล่าไว้ก่อน",
+      "source": "openai_whisper",
+      "confidence": null
+    },
+    {
+      "start": 71.36,
+      "end": 80.48,
+      "text": "สำหรับ BUNDLE ผมแนะนำ Power Bank คู่กับ Wireless Earbuds เพราะเหมาะกับคนเดินทาง ดูหนัง ฟังเพลง และไม่อยากให้แบดหมดระหว่างวันครับ",
+      "source": "openai_whisper",
+      "confidence": null
+    }
+  ]
+}

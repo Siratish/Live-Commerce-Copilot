@@ -84,7 +84,7 @@ class CaptioningTests(unittest.TestCase):
                 text=True,
             )
             summary = json.loads(completed.stdout)
-            self.assertEqual(summary["segment_count"], 22)
+            self.assertEqual(summary["segment_count"], 25)
             self.assertEqual(summary["language"], "th")
             self.assertEqual(summary["asr_provider"], "openai_whisper")
             self.assertEqual(summary["asr_model"], "large")

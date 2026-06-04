@@ -1,13 +1,20 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 import tempfile
 import unittest
 
 from src.data.catalog import load_product_catalog, load_promotions
 from src.schemas import ProductCatalogItem, Promotion
 from src.utils.full_demo_ui import (
+    FULL_DEMO_CHUNK_SECONDS,
+    FULL_DEMO_DYNAMIC_CHUNKING,
+    FULL_DEMO_PAUSE_SECONDS,
+    FULL_DEMO_SILENCE_THRESHOLD,
+    SAMPLE_AUDIO,
     build_catalog_scene_html,
+    run_recording_pipeline,
     save_product_catalog_csv,
     save_promotions_csv,
 )
@@ -90,6 +97,31 @@ class FullDemoUiTests(unittest.TestCase):
         self.assertEqual(loaded_catalog[0].compatible_with, ["SKU001"])
         self.assertEqual(loaded_promotions[0].promo_code, "NEWLIVE")
         self.assertTrue(loaded_promotions[0].live_only)
+
+    def test_audio_two_recording_uses_cached_outputs(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            session = SimpleNamespace(
+                output_dir=Path(temp_dir),
+                catalog=[],
+                promotions=[],
+            )
+            summary, captions, actions = run_recording_pipeline(
+                session=session,
+                audio_path=SAMPLE_AUDIO["Audio 2 - Tech"],
+                source_key="Audio 2 - Tech",
+                asr_provider="openai_whisper",
+                asr_model="turbo",
+                use_cached=False,
+                dynamic_chunking=FULL_DEMO_DYNAMIC_CHUNKING,
+                chunk_seconds=FULL_DEMO_CHUNK_SECONDS,
+                pause_seconds=FULL_DEMO_PAUSE_SECONDS,
+                silence_threshold=FULL_DEMO_SILENCE_THRESHOLD,
+            )
+
+        self.assertEqual(summary["source_mode"], "recording_cache")
+        self.assertGreater(len(captions.segments), 0)
+        self.assertGreater(len(actions), 0)
+        self.assertEqual(actions[0].skus, ["SKU005"])
 
 
 if __name__ == "__main__":

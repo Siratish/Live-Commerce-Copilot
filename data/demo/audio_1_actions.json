@@ -1,0 +1,128 @@
+[
+  {
+    "timestamp": 7.86,
+    "action_type": "PIN_PRODUCT_CARD",
+    "skus": [
+      "SKU001"
+    ],
+    "confidence": 0.714,
+    "evidence_text": "สวัสดีค่ะทุกคน ยินดีต้อนรับเข้าสู่ True ID Life Beauty Deal นะคะ วันนี้เรามีโปรพิเศษเฉพาะในไลฟนี้เท่านั้นค่ะ ตัวแรกคือวิตามิน C Serum จาก Demo Beauty ปกติราคา 399 บาท",
+    "display_payload": {
+      "title": "Pin product card",
+      "product": {
+        "sku": "SKU001",
+        "product_name": "Vitamin C Serum",
+        "brand": "DemoBeauty",
+        "category": "Skincare",
+        "price": 399,
+        "discount_price": 299,
+        "stock": 120,
+        "deeplink": "https://trueid.example/live/product/SKU001"
+      }
+    }
+  },
+  {
+    "timestamp": 29.34,
+    "action_type": "SHOW_PROMO_CODE",
+    "skus": [
+      "SKU001",
+      "SKU002",
+      "SKU007"
+    ],
+    "confidence": 0.95,
+    "evidence_text": "แต่ในไลฟนี้ลดเหลือ 299 บาทค่ะ ตัวนี้เหมาะสำหรับคนที่อยากให้ผิวดูกระจ่างใส มีส่วนผสมของวิตามิน C และ Hyaluronic Acid เนื้อบางเบาใช้ตอนเช้าหรือก่อนนอนได้ค่ะ ถ้าใครสนใจกดดูที่ Product Card ด้านล่างได้เลยนะคะ แล้วใช้ Code Life 2-5 เพื่อรับส่วนลดเพิ่ม",
+    "display_payload": {
+      "title": "Promo code detected",
+      "promo_code": "LIVE25",
+      "promo_description": "Extra 25% discount during live only",
+      "discount_type": "percent",
+      "discount_value": 25,
+      "live_only": true,
+      "eligible_categories": [
+        "Skincare"
+      ],
+      "eligible_tags": [
+        "skincare"
+      ],
+      "eligible_skus": [
+        "SKU001",
+        "SKU002",
+        "SKU007"
+      ]
+    }
+  },
+  {
+    "timestamp": 49.04,
+    "action_type": "PIN_PRODUCT_CARD",
+    "skus": [
+      "SKU002"
+    ],
+    "confidence": 0.97,
+    "evidence_text": "ตอนเช็คอ้าวต์เฉพาะช่วงไลฟนี้เท่านั้นค่ะ สำหรับใครที่ถามว่าใช้กับผิวแพ้ง่ายได้ไหม จากข้อมูลสินค้า ตัวนี้เป็นสูตรอ่อนโยนค่ะ แต่ถ้าผิวแพ้ง่ายมากแนะนำให้ลองทดสอบบดิเวณเล็กๆก่อนใช้นะคะ ต่อไปขอสลับไปอีกตัวหนึ่งนะคะ เมื่อกี้เป็นวิตามิน C ซีลัม ตอนนี้เป็น Green Tea Cleanseur จาก Demo Beauty ค่ะ",
+    "display_payload": {
+      "title": "Pin product card",
+      "product": {
+        "sku": "SKU002",
+        "product_name": "Green Tea Cleanser",
+        "brand": "DemoBeauty",
+        "category": "Skincare",
+        "price": 259,
+        "discount_price": 199,
+        "stock": 80,
+        "deeplink": "https://trueid.example/live/product/SKU002"
+      }
+    }
+  },
+  {
+    "timestamp": 62.94,
+    "action_type": "SHOW_BUNDLE_RECOMMENDATION",
+    "skus": [
+      "SKU002",
+      "SKU001"
+    ],
+    "confidence": 0.97,
+    "evidence_text": "ปกติราคา 259 บาท วันนี้เหลือ 199 บาท ตัวนี้เป็น Cleanseur สูตรอ่อนโยนเหมาะสำหรับใช้ทุกวันค่ะ ถ้าใช้คู่กันแนะนำให้ใช้ Green Tea Cleanseur ก่อน",
+    "display_payload": {
+      "title": "Recommended bundle",
+      "products": [
+        {
+          "sku": "SKU002",
+          "product_name": "Green Tea Cleanser",
+          "brand": "DemoBeauty",
+          "category": "Skincare",
+          "price": 259,
+          "discount_price": 199,
+          "stock": 80,
+          "deeplink": "https://trueid.example/live/product/SKU002"
+        },
+        {
+          "sku": "SKU001",
+          "product_name": "Vitamin C Serum",
+          "brand": "DemoBeauty",
+          "category": "Skincare",
+          "price": 399,
+          "discount_price": 299,
+          "stock": 120,
+          "deeplink": "https://trueid.example/live/product/SKU001"
+        }
+      ],
+      "reason": "Model-assisted transcript decision matched compatible catalog products."
+    }
+  },
+  {
+    "timestamp": 72.74,
+    "action_type": "START_FLASH_SALE_COUNTDOWN",
+    "skus": [
+      "SKU002",
+      "SKU001"
+    ],
+    "confidence": 0.87,
+    "evidence_text": "แล้วตามด้วยวิตามิน C ซีลุมหลังๆหน้านะคะ จะได้เป็น Skincare รูทินที่คบขึ้นค่ะ ตอนนี้โปรไลท์ 2 ห้าเหลือเวลาอีก 5 นาทีเท่านั้นนะคะ",
+    "display_payload": {
+      "title": "Flash sale countdown",
+      "duration_minutes": 5,
+      "duration_seconds": 300,
+      "promo_code": "LIVE25"
+    }
+  }
+]

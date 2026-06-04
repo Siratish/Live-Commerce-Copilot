@@ -171,6 +171,17 @@ def run_realtime_audio_file_demo(
     if not audio_windows:
         raise RuntimeError("no audio windows were produced for the realtime file demo")
 
+    config.output_dir.mkdir(parents=True, exist_ok=True)
+    chunk_dir = config.output_dir / "chunks"
+    chunk_dir.mkdir(parents=True, exist_ok=True)
+    captions_path = config.output_dir / "realtime_file_captions.json"
+    actions_path = config.output_dir / "realtime_file_actions.json"
+    save_caption_json(
+        CaptionResult(language=config.language, segments=[], duration_seconds=0.0),
+        captions_path,
+    )
+    save_commerce_actions([], actions_path)
+
     gate = playback_gate or _default_playback_gate(
         config.audio_path,
         audio_windows,
@@ -186,20 +197,29 @@ def run_realtime_audio_file_demo(
             "queueDepth": 0,
         }
     )
-    gate.wait_for_start()
+    start_status = gate.wait_for_start()
+    if start_status.get("stopped"):
+        return {
+            "caption_count": 0,
+            "action_count": 0,
+            "processed_chunks": 0,
+            "max_backlog_chunks": 0,
+            "stopped": True,
+            "audio_path": str(config.audio_path),
+            "captions_json": str(captions_path),
+            "actions_json": str(actions_path),
+            "chunk_dir": str(chunk_dir),
+        }
 
     asr_engine = asr or _build_file_stream_asr(config)
     catalog = load_product_catalog(config.catalog_path)
     promotions = load_promotions(config.promotions_path)
 
-    config.output_dir.mkdir(parents=True, exist_ok=True)
-    chunk_dir = config.output_dir / "chunks"
-    chunk_dir.mkdir(parents=True, exist_ok=True)
-
     live_segments: List[CaptionSegment] = []
     live_actions = []
     processed_chunks = 0
     max_backlog = 0
+    stopped_by_user = False
 
     for index, window in enumerate(audio_windows, start=1):
         gate.publish(
@@ -214,6 +234,18 @@ def run_realtime_audio_file_demo(
         )
         status = gate.wait_until(window.end)
         current_time = float(status.get("currentTime") or window.end)
+        if status.get("stopped") and current_time < window.end:
+            stopped_by_user = True
+            gate.publish(
+                {
+                    "state": "stopped",
+                    "status": "input_closed",
+                    "chunkIndex": index,
+                    "totalChunks": len(audio_windows),
+                    "processedChunks": processed_chunks,
+                }
+            )
+            break
         released = sum(1 for item in audio_windows if item.end <= current_time)
         backlog = max(0, released - processed_chunks - 1)
         max_backlog = max(max_backlog, backlog)
@@ -252,8 +284,8 @@ def run_realtime_audio_file_demo(
             promotions,
             decision_provider=decision_provider,
         )
-        save_caption_json(caption_result, config.output_dir / "realtime_file_captions.json")
-        save_commerce_actions(live_actions, config.output_dir / "realtime_file_actions.json")
+        save_caption_json(caption_result, captions_path)
+        save_commerce_actions(live_actions, actions_path)
         _display_realtime_file_state(
             index=index,
             total=len(audio_windows),
@@ -285,9 +317,10 @@ def run_realtime_audio_file_demo(
         "action_count": len(live_actions),
         "processed_chunks": processed_chunks,
         "max_backlog_chunks": max_backlog,
+        "stopped": stopped_by_user,
         "audio_path": str(config.audio_path),
-        "captions_json": str(config.output_dir / "realtime_file_captions.json"),
-        "actions_json": str(config.output_dir / "realtime_file_actions.json"),
+        "captions_json": str(captions_path),
+        "actions_json": str(actions_path),
         "chunk_dir": str(chunk_dir),
     }
 
@@ -369,38 +402,55 @@ def _build_realtime_audio_file_html(
     widget_id: str,
 ) -> str:
     duration = max((window.end for window in windows), default=0.0)
-    rows = "".join(
-        (
-            "<tr>"
-            f"<td>{index}</td>"
-            f"<td>{window.start:.2f}s</td>"
-            f"<td>{window.end:.2f}s</td>"
-            f"<td>{window.end - window.start:.2f}s</td>"
-            "</tr>"
-        )
-        for index, window in enumerate(windows[:12], start=1)
-    )
     return f"""
-<div id="{widget_id}" style="border:1px solid #d0d5dd;border-radius:8px;padding:12px;font-family:Arial,sans-serif;max-width:900px;background:#fff;">
-  <div style="font-weight:700;font-size:16px;margin-bottom:8px;">Real-Time Audio File Stream</div>
-  <audio controls preload="metadata" src="{_audio_data_uri(audio_path)}" style="width:100%;margin-bottom:10px;"></audio>
-  <div style="display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin-bottom:10px;">
-    <div><div style="color:#667085;font-size:12px;">Playback</div><div data-role="time" style="font-weight:700;">0.00s / {duration:.2f}s</div></div>
-    <div><div style="color:#667085;font-size:12px;">State</div><div data-role="state" style="font-weight:700;">waiting</div></div>
-    <div><div style="color:#667085;font-size:12px;">Chunk</div><div data-role="chunk" style="font-weight:700;">-</div></div>
-    <div><div style="color:#667085;font-size:12px;">Queue</div><div data-role="queue" style="font-weight:700;">0</div></div>
+<div id="{widget_id}" style="border:1px solid #d0d5dd;border-radius:8px;padding:14px;font-family:Arial,sans-serif;background:#fff;box-shadow:0 8px 24px rgba(16,24,40,.06);">
+  <style>
+    #{widget_id} .rt-grid{{display:grid;grid-template-columns:minmax(0,1.25fr) minmax(240px,.75fr);gap:14px}}
+    #{widget_id} .rt-video{{height:360px;border-radius:8px;background:linear-gradient(145deg,#171717,#7f1d1d 55%,#0f766e);position:relative;overflow:hidden}}
+    #{widget_id} .rt-video:after{{content:"LIVE";position:absolute;top:14px;left:14px;background:#fff;color:#111827;border-radius:999px;padding:7px 12px;font-size:12px;font-weight:800}}
+    #{widget_id} .rt-host{{position:absolute;left:50%;top:54%;transform:translate(-50%,-50%);width:170px;height:220px}}
+    #{widget_id} .rt-head{{width:76px;height:76px;border-radius:50%;background:#fff7ed;margin:0 auto 8px;border:5px solid rgba(255,255,255,.42)}}
+    #{widget_id} .rt-body{{width:150px;height:130px;border-radius:42px 42px 10px 10px;background:#ef4444;margin:0 auto;box-shadow:0 18px 60px rgba(0,0,0,.28)}}
+    #{widget_id} .rt-caption{{position:absolute;left:18px;right:18px;bottom:18px;background:rgba(17,24,39,.88);color:#fff;border-radius:8px;padding:13px;font-size:16px;line-height:1.4}}
+    #{widget_id} .rt-panel-title{{font-weight:800;font-size:17px;color:#111827;margin-bottom:8px}}
+    #{widget_id} .rt-muted{{color:#667085;font-size:12px;line-height:1.4}}
+    #{widget_id} .rt-metrics{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin:12px 0}}
+    #{widget_id} .rt-metric{{border:1px solid #eaecf0;border-radius:8px;padding:10px;background:#f9fafb}}
+    #{widget_id} .rt-metric strong{{display:block;color:#111827;margin-top:3px}}
+    #{widget_id} .rt-buttons{{display:flex;gap:8px;margin:10px 0}}
+    #{widget_id} button{{border:0;border-radius:8px;padding:10px 13px;font-weight:800;cursor:pointer}}
+    #{widget_id} [data-role=start]{{background:#b42318;color:#fff}}
+    #{widget_id} [data-role=stop]{{background:#f2f4f7;color:#344054}}
+    #{widget_id} [data-role=stop]:disabled{{opacity:.5;cursor:not-allowed}}
+    #{widget_id} .rt-progress{{height:10px;background:#f2f4f7;border-radius:999px;overflow:hidden;margin-top:8px}}
+    #{widget_id} .rt-progress div{{height:100%;width:0%;background:#e51b23}}
+    @media (max-width: 900px){{#{widget_id} .rt-grid{{grid-template-columns:1fr}}}}
+  </style>
+  <audio preload="metadata" src="{_audio_data_uri(audio_path)}" style="display:none;"></audio>
+  <div class="rt-grid">
+    <div>
+      <div class="rt-video">
+        <div class="rt-host"><div class="rt-head"></div><div class="rt-body"></div></div>
+        <div class="rt-caption" data-role="caption">Press Start to begin the simulated live stream.</div>
+      </div>
+      <div class="rt-progress"><div data-role="progress"></div></div>
+    </div>
+    <div>
+      <div class="rt-panel-title">Live Audio Stream</div>
+      <div class="rt-muted">Audio is released to ASR only as stream time advances. Seeking is disabled for this demo.</div>
+      <div class="rt-buttons">
+        <button data-role="start">Start / Continue</button>
+        <button data-role="stop" disabled>Stop input</button>
+      </div>
+      <div class="rt-metrics">
+        <div class="rt-metric"><div class="rt-muted">Playback</div><strong data-role="time">0.00s / {duration:.2f}s</strong></div>
+        <div class="rt-metric"><div class="rt-muted">State</div><strong data-role="state">ready</strong></div>
+        <div class="rt-metric"><div class="rt-muted">Chunk</div><strong data-role="chunk">-</strong></div>
+        <div class="rt-metric"><div class="rt-muted">Queue</div><strong data-role="queue">0</strong></div>
+      </div>
+      <div class="rt-muted" data-role="detail">Start the stream to release the first chunk.</div>
+    </div>
   </div>
-  <div style="height:10px;background:#f2f4f7;border-radius:999px;overflow:hidden;margin-bottom:8px;">
-    <div data-role="progress" style="height:100%;width:0%;background:#e51b23;"></div>
-  </div>
-  <div data-role="detail" style="color:#667085;font-size:12px;margin-bottom:10px;">Press play. ASR will not start for a chunk until playback reaches that chunk end.</div>
-  <details>
-    <summary style="cursor:pointer;color:#344054;">Prepared stream chunks ({len(windows)})</summary>
-    <table style="width:100%;border-collapse:collapse;margin-top:8px;font-size:12px;">
-      <thead><tr><th align="left">#</th><th align="left">start</th><th align="left">release at</th><th align="left">length</th></tr></thead>
-      <tbody>{rows}</tbody>
-    </table>
-  </details>
 </div>
 """
 
@@ -412,8 +462,11 @@ def _build_realtime_audio_file_js(widget_id: str, poll_seconds: float) -> str:
   const root = document.getElementById({json.dumps(widget_id)});
   if (!root) return;
   const audio = root.querySelector("audio");
+  const startButton = root.querySelector('[data-role="start"]');
+  const stopButton = root.querySelector('[data-role="stop"]');
   const pollMilliseconds = {poll_milliseconds};
   const get = role => root.querySelector(`[data-role="${{role}}"]`);
+  let stopRequested = false;
   const duration = () => audio.duration && Number.isFinite(audio.duration) ? audio.duration : 0;
   const updateTime = () => {{
     const total = duration();
@@ -422,6 +475,23 @@ def _build_realtime_audio_file_js(widget_id: str, poll_seconds: float) -> str:
     get("progress").style.width = `${{pct}}%`;
   }};
   const apiRoot = window.realtimeAudioFileDemo = window.realtimeAudioFileDemo || {{}};
+  const stopInput = () => {{
+    stopRequested = true;
+    audio.pause();
+    startButton.disabled = true;
+    stopButton.disabled = true;
+    get("state").textContent = "stopped";
+    get("detail").textContent = "Input stopped. Already released chunks will finish processing.";
+  }};
+  startButton.onclick = () => {{
+    if (stopRequested) return;
+    audio.play();
+    startButton.disabled = true;
+    stopButton.disabled = false;
+    get("state").textContent = "playing";
+    get("caption").textContent = "Streaming audio into ASR...";
+  }};
+  stopButton.onclick = stopInput;
   apiRoot[{json.dumps(widget_id)}] = {{
     getStatus() {{
       updateTime();
@@ -429,22 +499,31 @@ def _build_realtime_audio_file_js(widget_id: str, poll_seconds: float) -> str:
         currentTime: audio.currentTime || 0,
         paused: audio.paused,
         ended: audio.ended,
-        duration: duration()
+        duration: duration(),
+        stopped: stopRequested
       }};
     }},
     waitForStart() {{
       updateTime();
-      get("state").textContent = "waiting_for_play";
-      get("detail").textContent = "Press play to begin the simulated live stream.";
-      if (!audio.paused && !audio.ended) return Promise.resolve(this.getStatus());
+      get("state").textContent = "waiting_for_start";
+      get("detail").textContent = "Press Start to begin the simulated live stream.";
+      if (stopRequested || (!audio.paused && !audio.ended)) return Promise.resolve(this.getStatus());
       return new Promise(resolve => {{
         const onPlay = () => {{
           audio.removeEventListener("play", onPlay);
+          audio.removeEventListener("pause", onStop);
           get("state").textContent = "playing";
           get("detail").textContent = "Playback started. Chunks are released by audio time.";
           resolve(this.getStatus());
         }};
+        const onStop = () => {{
+          if (!stopRequested) return;
+          audio.removeEventListener("play", onPlay);
+          audio.removeEventListener("pause", onStop);
+          resolve(this.getStatus());
+        }};
         audio.addEventListener("play", onPlay);
+        audio.addEventListener("pause", onStop);
       }});
     }},
     waitUntil(targetSeconds) {{
@@ -454,7 +533,7 @@ def _build_realtime_audio_file_js(widget_id: str, poll_seconds: float) -> str:
       return new Promise(resolve => {{
         const check = () => {{
           updateTime();
-          if ((audio.currentTime || 0) >= targetSeconds || audio.ended) {{
+          if (stopRequested || (audio.currentTime || 0) >= targetSeconds || audio.ended) {{
             cleanup();
             resolve(this.getStatus());
           }}
@@ -479,6 +558,7 @@ def _build_realtime_audio_file_js(widget_id: str, poll_seconds: float) -> str:
       if (payload.state) get("state").textContent = payload.state;
       if (payload.chunkIndex) get("chunk").textContent = `${{payload.chunkIndex}} / ${{payload.totalChunks || "?"}}`;
       if (payload.queueDepth !== undefined) get("queue").textContent = String(payload.queueDepth);
+      if (payload.status) get("caption").textContent = payload.status;
       const detail = [];
       if (payload.status) detail.push(payload.status);
       if (payload.chunkStart !== undefined && payload.chunkEnd !== undefined) {{

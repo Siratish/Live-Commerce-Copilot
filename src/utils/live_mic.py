@@ -527,7 +527,7 @@ def _install_colab_mic_recorder() -> None:
                   animationId = requestAnimationFrame(monitorPause);
                 });
               };
-              window.liveCommerceMic.startBufferedRecording = function(
+              window.liveCommerceMic.startBufferedRecording = async function(
                 maxMilliseconds,
                 minMilliseconds,
                 silenceMilliseconds,
@@ -544,12 +544,38 @@ def _install_colab_mic_recorder() -> None:
                   };
                 }
                 state.stopRequested = false;
+                state.startRequested = false;
                 state.bufferQueue = [];
                 state.bufferWaiters = [];
                 state.bufferDone = false;
                 state.bufferError = null;
                 state.droppedChunks = 0;
                 state.maxQueueChunks = Math.max(1, Number(maxQueueChunks || 16));
+                state.waitForStart = function() {
+                  if (state.startRequested) return Promise.resolve(true);
+                  return new Promise(resolve => {
+                    state.resolveStart = resolve;
+                  });
+                };
+                state.publishDebug({
+                  chunkIndex: 1,
+                  state: 'ready',
+                  status: 'press_start',
+                  queueDepth: 0,
+                  droppedChunks: 0,
+                  maxSeconds: maxMilliseconds / 1000,
+                  minSeconds: minMilliseconds / 1000,
+                  pauseSeconds: silenceMilliseconds / 1000
+                });
+                await state.waitForStart();
+                if (state.stopRequested) {
+                  return {
+                    started: false,
+                    reason: 'stopped_before_start',
+                    queueDepth: 0,
+                    droppedChunks: 0
+                  };
+                }
                 state.bufferSessionStartedAt = performance.now();
                 state.bufferLoopActive = true;
                 const wakeWaiter = (payload) => {
@@ -780,7 +806,8 @@ def install_colab_live_mic_debug_panel() -> None:
               max-width:720px;
               background:#fff;
             ">
-              <div style="font-weight:700;font-size:16px;margin-bottom:8px;">Live Mic Debug</div>
+              <div style="font-weight:700;font-size:16px;margin-bottom:4px;">Live Microphone Stream</div>
+              <div style="color:#667085;font-size:12px;margin-bottom:10px;">Press Start to begin sending mic audio to ASR. Stop closes the input; queued chunks still finish processing.</div>
               <div style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin-bottom:10px;">
                 <div><div style="color:#667085;font-size:12px;">Chunk</div><div id="mic-debug-chunk" style="font-weight:700;">-</div></div>
                 <div><div style="color:#667085;font-size:12px;">Detector</div><div id="mic-debug-status" style="font-weight:700;">waiting</div></div>
@@ -795,8 +822,8 @@ def install_colab_live_mic_debug_panel() -> None:
               <div style="height:12px;background:#f2f4f7;border-radius:999px;overflow:hidden;">
                 <div id="mic-debug-meter" style="height:100%;width:0%;background:#12b76a;"></div>
               </div>
-              <button id="mic-debug-stop" style="
-                margin-top:10px;
+              <div style="display:flex;gap:8px;margin-top:10px;">
+              <button id="mic-debug-start" style="
                 border:0;
                 border-radius:6px;
                 padding:8px 12px;
@@ -804,7 +831,18 @@ def install_colab_live_mic_debug_panel() -> None:
                 color:#fff;
                 font-weight:700;
                 cursor:pointer;
+              ">Start live mic</button>
+              <button id="mic-debug-stop" disabled style="
+                margin-top:10px;
+                border:0;
+                border-radius:6px;
+                padding:8px 12px;
+                background:#f2f4f7;
+                color:#344054;
+                font-weight:700;
+                cursor:pointer;
               ">Stop live mic</button>
+              </div>
               <div id="mic-debug-detail" style="margin-top:8px;color:#667085;font-size:12px;">Run the live mic demo cell to start receiving values.</div>
             </div>
             """
@@ -825,13 +863,28 @@ def install_colab_live_mic_debug_panel() -> None:
                 const status = payload.status || 'waiting';
                 const isSpeech = status === 'speech';
                 const isSilence = status === 'silence';
+                const startButton = get('mic-debug-start');
                 const stopButton = get('mic-debug-stop');
+                if (startButton && !startButton.dataset.bound) {
+                  startButton.dataset.bound = '1';
+                  startButton.onclick = () => {
+                    state.startRequested = true;
+                    if (typeof state.resolveStart === 'function') {
+                      state.resolveStart(true);
+                      state.resolveStart = null;
+                    }
+                    startButton.textContent = 'Recording...';
+                    startButton.disabled = true;
+                    if (stopButton) stopButton.disabled = false;
+                  };
+                }
                 if (stopButton && !stopButton.dataset.bound) {
                   stopButton.dataset.bound = '1';
                   stopButton.onclick = () => {
                     if (typeof state.stop === 'function') state.stop();
                     stopButton.textContent = 'Stopping...';
                     stopButton.disabled = true;
+                    if (startButton) startButton.disabled = true;
                   };
                 }
                 const meterPct = Math.max(0, Math.min(100, (rms / Math.max(threshold || 0.001, 0.001)) * 70));

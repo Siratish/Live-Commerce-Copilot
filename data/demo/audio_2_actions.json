@@ -1,0 +1,110 @@
+[
+  {
+    "timestamp": 6.16,
+    "action_type": "PIN_PRODUCT_CARD",
+    "skus": [
+      "SKU005"
+    ],
+    "confidence": 0.95,
+    "evidence_text": "สวัสดีครับทุกคน วันนี้เราอยู่กับ True ID Tech Live Deal สำหรับคนที่ใช้มือถือทุกวันนะครับ สินค้าตัวแรกคือ Fast Charge Power Bank 1 000-0-0-0-0-MH จาก Demotech ปกติราคา 799 บาท",
+    "display_payload": {
+      "title": "Pin product card",
+      "product": {
+        "sku": "SKU005",
+        "product_name": "FastCharge Power Bank 10000mAh",
+        "brand": "DemoTech",
+        "category": "Mobile Accessories",
+        "price": 799,
+        "discount_price": 599,
+        "stock": 45,
+        "deeplink": "https://trueid.example/live/product/SKU005"
+      }
+    }
+  },
+  {
+    "timestamp": 21.92,
+    "action_type": "SHOW_PROMO_CODE",
+    "skus": [
+      "SKU005",
+      "SKU006",
+      "SKU008"
+    ],
+    "confidence": 0.95,
+    "evidence_text": "วันนี้ลดเหลือ 599 บาท ตัวนี้รองรับ Fast Charging และมีพอร์ต USB-C เหมาะสำหรับคนที่เดินทางบ่อย หรือดูวิดีโอบนมือถือเป็นเวลานานครับ ใช้โคตรเทกส 1 000-0-0-0-0-100 บาท เมื่อซื้อผ่าน Live นี้นะครับ",
+    "display_payload": {
+      "title": "Promo code detected",
+      "promo_code": "TECH100",
+      "promo_description": "100 THB discount during tech live",
+      "discount_type": "fixed_amount",
+      "discount_value": 100,
+      "live_only": true,
+      "eligible_categories": [
+        "Mobile Accessories"
+      ],
+      "eligible_tags": [],
+      "eligible_skus": [
+        "SKU005",
+        "SKU006",
+        "SKU008"
+      ]
+    }
+  },
+  {
+    "timestamp": 36.88,
+    "action_type": "PIN_PRODUCT_CARD",
+    "skus": [
+      "SKU006"
+    ],
+    "confidence": 1.0,
+    "evidence_text": "กดที่ Product Card ได้เลย เดี๋ยวผมขอแก้ไขนิดนึงนะครับ เมื่อกี้ผมพูดว่าแถมใส่ชาร์จ แต่จริงๆ รุ่นนี้ไม่ได้แถมใส่ชาร์จนะครับ ในกล่องมีเฉพาะ Power Bank และคู่มือการใช้งานครับ ต่อไปเป็น Wireless Earbuds Lite จาก Demo Sound ราคาเต็ม 1,290 บาท วันนี้ลดเหลือ 990 บาท",
+    "display_payload": {
+      "title": "Pin product card",
+      "product": {
+        "sku": "SKU006",
+        "product_name": "Wireless Earbuds Lite",
+        "brand": "DemoSound",
+        "category": "Mobile Accessories",
+        "price": 1290,
+        "discount_price": 990,
+        "stock": 35,
+        "deeplink": "https://trueid.example/live/product/SKU006"
+      }
+    }
+  },
+  {
+    "timestamp": 71.36,
+    "action_type": "SHOW_BUNDLE_RECOMMENDATION",
+    "skus": [
+      "SKU006",
+      "SKU005"
+    ],
+    "confidence": 0.84,
+    "evidence_text": "ตัวนี้เหมาะสำหรับฟังเพลงดูซีรีย์ และใช้ประชุมออนไลน์ มี Low Latency Mode ด้วยนะครับ ถ้าใครถามว่าตัวนี้ใช้กับ iPhone ได้ไหม จากข้อมูลสินค้ารองรับ Bluetooth 5.3 และใช้ได้กับมือถือที่รองรับ Bluetooth ทั่วไปครับ ตัวนี้เหลือสตอคไม่เยอะนะครับ ถ้าสนใจ Earbuds ตัวนี้แนะนำให้กดใส่ตะกล่าไว้ก่อน สำหรับ BUNDLE ผมแนะนำ Power Bank คู่กับ Wireless Earbuds เพราะเหมาะกับคนเดินทาง ดูหนัง ฟังเพลง และไม่อยากให้แบดหมดระหว่างวันครับ",
+    "display_payload": {
+      "title": "Recommended bundle",
+      "products": [
+        {
+          "sku": "SKU006",
+          "product_name": "Wireless Earbuds Lite",
+          "brand": "DemoSound",
+          "category": "Mobile Accessories",
+          "price": 1290,
+          "discount_price": 990,
+          "stock": 35,
+          "deeplink": "https://trueid.example/live/product/SKU006"
+        },
+        {
+          "sku": "SKU005",
+          "product_name": "FastCharge Power Bank 10000mAh",
+          "brand": "DemoTech",
+          "category": "Mobile Accessories",
+          "price": 799,
+          "discount_price": 599,
+          "stock": 45,
+          "deeplink": "https://trueid.example/live/product/SKU005"
+        }
+      ],
+      "reason": "Model-assisted transcript decision matched compatible catalog products."
+    }
+  }
+]

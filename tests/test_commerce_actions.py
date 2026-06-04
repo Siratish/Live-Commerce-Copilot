@@ -57,11 +57,11 @@ class CommerceActionTests(unittest.TestCase):
         self.assertEqual(
             sequence,
             [
-                (PIN_PRODUCT_CARD, ["SKU001"], 8.30),
-                (SHOW_PROMO_CODE, ["SKU001", "SKU002", "SKU007"], 29.36),
-                (PIN_PRODUCT_CARD, ["SKU002"], 49.08),
-                (SHOW_BUNDLE_RECOMMENDATION, ["SKU002", "SKU001"], 63.08),
-                (START_FLASH_SALE_COUNTDOWN, ["SKU002", "SKU001"], 70.58),
+                (PIN_PRODUCT_CARD, ["SKU001"], 7.86),
+                (SHOW_PROMO_CODE, ["SKU001", "SKU002", "SKU007"], 29.34),
+                (PIN_PRODUCT_CARD, ["SKU002"], 49.04),
+                (SHOW_BUNDLE_RECOMMENDATION, ["SKU002", "SKU001"], 62.94),
+                (START_FLASH_SALE_COUNTDOWN, ["SKU002", "SKU001"], 72.74),
             ],
         )
 

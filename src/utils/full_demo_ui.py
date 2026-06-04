@@ -36,6 +36,11 @@ SAMPLE_AUDIO = {
 }
 SAMPLE_CACHED_TRANSCRIPTS = {
     "Audio 1 - Beauty": REPO_ROOT / "data" / "demo" / "audio_1_captions.json",
+    "Audio 2 - Tech": REPO_ROOT / "data" / "demo" / "audio_2_captions.json",
+}
+SAMPLE_CACHED_ACTIONS = {
+    "Audio 1 - Beauty": REPO_ROOT / "data" / "demo" / "audio_1_actions.json",
+    "Audio 2 - Tech": REPO_ROOT / "data" / "demo" / "audio_2_actions.json",
 }
 FULL_DEMO_ASR_PROVIDER = "openai_whisper"
 FULL_DEMO_ASR_MODEL = "turbo"
@@ -92,7 +97,8 @@ def display_full_demo_ui(repo_root: Path = REPO_ROOT) -> None:
     session = FullDemoSession(repo_root)
     state: Dict[str, Any] = {
         "mode": "recording",
-        "source": "Audio 1 - Beauty",
+        "source": None,
+        "running": False,
     }
 
     display(HTML(_style_block()))
@@ -111,14 +117,8 @@ def display_full_demo_ui(repo_root: Path = REPO_ROOT) -> None:
     upload = widgets.FileUpload(
         accept="audio/*",
         multiple=False,
-        description="Choose audio file",
+        description="Select audio",
         layout=widgets.Layout(width="220px"),
-    )
-    run_button = widgets.Button(
-        description="Process Recording",
-        button_style="danger",
-        icon="play",
-        layout=widgets.Layout(width="210px", height="44px"),
     )
     refresh_button = widgets.Button(
         description="Refresh Catalog",
@@ -142,7 +142,7 @@ def display_full_demo_ui(repo_root: Path = REPO_ROOT) -> None:
         "live": widgets.Button(
             description="Live",
             icon="play-circle",
-            tooltip="Release chunks only after playback or speech reaches them.",
+            tooltip="Run a real-time stream with start and stop controls.",
             layout=widgets.Layout(width="168px", height="48px"),
         ),
     }
@@ -153,8 +153,6 @@ def display_full_demo_ui(repo_root: Path = REPO_ROOT) -> None:
             key="Audio 1 - Beauty",
             title="Audio 1",
             subtitle="Beauty live stream",
-            thumb="A1",
-            tone="beauty",
             icon="shopping-bag",
             source_buttons=source_buttons,
         ),
@@ -163,8 +161,6 @@ def display_full_demo_ui(repo_root: Path = REPO_ROOT) -> None:
             key="Audio 2 - Tech",
             title="Audio 2",
             subtitle="Tech live stream",
-            thumb="A2",
-            tone="tech",
             icon="bolt",
             source_buttons=source_buttons,
         ),
@@ -173,8 +169,6 @@ def display_full_demo_ui(repo_root: Path = REPO_ROOT) -> None:
             key="upload",
             title="Upload",
             subtitle="Use your own audio file",
-            thumb="UP",
-            tone="upload",
             icon="upload",
             source_buttons=source_buttons,
         ),
@@ -183,8 +177,6 @@ def display_full_demo_ui(repo_root: Path = REPO_ROOT) -> None:
             key="mic",
             title="Mic",
             subtitle="Speak from browser mic",
-            thumb="MC",
-            tone="mic",
             icon="microphone",
             source_buttons=source_buttons,
         ),
@@ -212,7 +204,6 @@ def display_full_demo_ui(repo_root: Path = REPO_ROOT) -> None:
             ),
             source_detail,
             selected_summary,
-            run_button,
             widgets.HTML(
                 '<div class="lc-defaults">'
                 "<strong>Fixed ASR setup:</strong> OpenAI Whisper turbo, Thai, "
@@ -226,7 +217,7 @@ def display_full_demo_ui(repo_root: Path = REPO_ROOT) -> None:
     controls.add_class("lc-operator-panel")
 
     def current_audio_path() -> Optional[Path]:
-        source_key = str(state["source"])
+        source_key = str(state.get("source") or "")
         if source_key in SAMPLE_AUDIO:
             return SAMPLE_AUDIO[source_key]
         if source_key == "upload":
@@ -240,12 +231,12 @@ def display_full_demo_ui(repo_root: Path = REPO_ROOT) -> None:
             display(HTML(build_catalog_scene_html(session.catalog, session.promotions)))
 
     def selected_source_label() -> str:
-        source_key = str(state["source"])
+        source_key = str(state.get("source") or "")
         if source_key == "upload":
             return "uploaded audio"
         if source_key == "mic":
             return "browser microphone"
-        return source_key
+        return source_key or "no source selected"
 
     def selected_mode_label() -> str:
         return "Live" if state["mode"] == "live" else "Recording"
@@ -256,48 +247,55 @@ def display_full_demo_ui(repo_root: Path = REPO_ROOT) -> None:
         for key, button in source_buttons.items():
             button.button_style = "danger" if key == state["source"] else ""
 
-        if state["mode"] == "live" and state["source"] == "mic":
-            run_button.description = "Start Live Mic"
-            run_button.icon = "microphone"
-        elif state["mode"] == "live":
-            run_button.description = "Start Live Replay"
-            run_button.icon = "play"
-        elif state["source"] == "mic":
-            run_button.description = "Record and Process"
-            run_button.icon = "microphone"
+        if state.get("source") is None:
+            selected_summary.value = (
+                '<div class="lc-selected-summary">'
+                "Choose an audio source to start the selected demo mode."
+                "</div>"
+            )
         else:
-            run_button.description = "Process Recording"
-            run_button.icon = "play"
-
-        selected_summary.value = (
-            '<div class="lc-selected-summary">'
-            f"<strong>{html.escape(selected_mode_label())}</strong> using "
-            f"<strong>{html.escape(selected_source_label())}</strong>"
-            "</div>"
-        )
+            selected_summary.value = (
+                '<div class="lc-selected-summary">'
+                f"<strong>{html.escape(selected_mode_label())}</strong> using "
+                f"<strong>{html.escape(selected_source_label())}</strong>"
+                "</div>"
+            )
 
         if state["source"] == "upload":
             source_detail.children = [
                 widgets.HTML(
-                    '<div class="lc-source-detail">Upload an audio file, then run the '
-                    "selected mode. Recording processes the full file; Live replays it "
-                    "as a timed stream.</div>"
+                    '<div class="lc-upload-panel">'
+                    '<div class="lc-source-icon">UP</div>'
+                    '<div><strong>Upload an audio file</strong>'
+                    '<div class="lc-muted">The demo starts automatically after the file is selected.</div>'
+                    "</div></div>"
                 ),
                 upload,
             ]
         elif state["source"] == "mic":
             source_detail.children = [
                 widgets.HTML(
-                    '<div class="lc-source-detail">Mic source uses Colab browser audio. '
-                    "Recording captures one 15s clip. Live keeps recording into a queue "
-                    "until you stop it from the browser debug panel.</div>"
+                    '<div class="lc-source-detail">'
+                    '<strong>Microphone source</strong><br>'
+                    "Recording mode opens a confirm/cancel recorder in the showcase. "
+                    "Live mode opens start/stop stream controls there."
+                    "</div>"
+                )
+            ]
+        elif state.get("source") is None:
+            source_detail.children = [
+                widgets.HTML(
+                    '<div class="lc-source-detail">'
+                    "Audio 1 and Audio 2 use cached recording outputs. Upload and mic "
+                    "run through the selected ASR flow."
+                    "</div>"
                 )
             ]
         else:
             source_detail.children = [
                 widgets.HTML(
                     f'<div class="lc-source-detail">{html.escape(selected_source_label())} '
-                    "is bundled with the repo and ready to run.</div>"
+                    "is bundled with the repo. Selecting this source starts the demo.</div>"
                 )
             ]
 
@@ -307,15 +305,24 @@ def display_full_demo_ui(repo_root: Path = REPO_ROOT) -> None:
     def set_mode(value: str) -> None:
         state["mode"] = value
         refresh_selection_ui()
+        if state.get("source") is not None:
+            run_selected_source()
 
     def set_source(value: str) -> None:
         state["source"] = value
         refresh_selection_ui()
+        run_selected_source()
 
     for key, button in mode_buttons.items():
         button.on_click(lambda _button, key=key: set_mode(key))
     for key, button in source_buttons.items():
         button.on_click(lambda _button, key=key: set_source(key))
+
+    def on_upload_change(change: Dict[str, Any]) -> None:
+        if state.get("source") == "upload" and change.get("new"):
+            run_selected_source()
+
+    upload.observe(on_upload_change, names="value")
 
     def render_idle_viewer() -> None:
         audio_path = current_audio_path()
@@ -337,7 +344,23 @@ def display_full_demo_ui(repo_root: Path = REPO_ROOT) -> None:
                 )
             )
 
-    def run_demo(_: Any) -> None:
+    def run_selected_source() -> None:
+        if state.get("running"):
+            with output:
+                print("A demo run is already active. Wait for it to finish or stop the stream.")
+            return
+        if state["source"] == "upload" and not upload.value:
+            with output:
+                output.clear_output(wait=True)
+                print("Select an audio file to start.")
+            return
+        state["running"] = True
+        try:
+            run_demo()
+        finally:
+            state["running"] = False
+
+    def run_demo() -> None:
         with output:
             output.clear_output(wait=True)
             print(
@@ -349,14 +372,14 @@ def display_full_demo_ui(repo_root: Path = REPO_ROOT) -> None:
 
         try:
             if state["mode"] == "recording":
-                audio_path = (
-                    record_colab_mic_clip(
-                        session.upload_dir,
-                        max_seconds=FULL_DEMO_CHUNK_SECONDS,
-                    )
-                    if state["source"] == "mic"
-                    else current_audio_path()
-                )
+                if state["source"] == "mic":
+                    with viewer:
+                        audio_path = record_colab_mic_clip(
+                            session.upload_dir,
+                            max_seconds=FULL_DEMO_CHUNK_SECONDS,
+                        )
+                else:
+                    audio_path = current_audio_path()
                 if audio_path is None:
                     raise RuntimeError("Choose a sample, upload an audio file, or use microphone.")
                 summary, captions, actions = run_recording_pipeline(
@@ -381,6 +404,7 @@ def display_full_demo_ui(repo_root: Path = REPO_ROOT) -> None:
                                 actions=actions,
                                 mode_label="Recording mode",
                                 title="Batch ASR + action preview",
+                                show_audio_controls=True,
                             )
                         )
                     )
@@ -420,9 +444,10 @@ def display_full_demo_ui(repo_root: Path = REPO_ROOT) -> None:
                                 actions=actions,
                                 mode_label="Live replay mode",
                                 title="Real-time gated file stream result",
+                                show_audio_controls=False,
                             )
                         )
-                )
+                    )
                 state["last_summary"] = summary
 
             else:
@@ -465,7 +490,6 @@ def display_full_demo_ui(repo_root: Path = REPO_ROOT) -> None:
             with output:
                 print(f"Demo failed: {exc}")
 
-    run_button.on_click(run_demo)
     refresh_button.on_click(refresh_catalog)
 
     form_ui = build_catalog_forms(session, refresh_catalog)
@@ -526,15 +550,13 @@ def _source_card_widget(
     key: str,
     title: str,
     subtitle: str,
-    thumb: str,
-    tone: str,
     icon: str,
     source_buttons: Dict[str, Any],
 ) -> Any:
-    thumb_html = widgets.HTML(
+    icon_html = widgets.HTML(
         f"""
-        <div class="lc-source-thumb lc-source-thumb-{html.escape(tone)}">
-          <span>{html.escape(thumb)}</span>
+        <div class="lc-source-icon-wrap">
+          <span class="fa fa-{html.escape(icon)}"></span>
         </div>
         """
     )
@@ -548,7 +570,7 @@ def _source_card_widget(
     source_buttons[key] = button
     card = widgets.VBox(
         [
-            thumb_html,
+            icon_html,
             button,
             widgets.HTML(f'<div class="lc-source-caption">{html.escape(subtitle)}</div>'),
         ],
@@ -571,11 +593,17 @@ def run_recording_pipeline(
     silence_threshold: float,
 ) -> Tuple[Dict[str, Any], CaptionResult, List[CommerceAction]]:
     cached_path = SAMPLE_CACHED_TRANSCRIPTS.get(source_key)
+    cached_actions_path = SAMPLE_CACHED_ACTIONS.get(source_key)
     output_dir = session.output_dir / "recording"
-    if use_cached and cached_path and cached_path.exists():
+    if cached_path and cached_actions_path and cached_path.exists() and cached_actions_path.exists():
         captions = load_cached_transcript(cached_path)
+        actions = _load_actions(cached_actions_path)
         paths = write_caption_outputs(captions, output_dir)
-        source_mode = "cached"
+        actions_path = output_dir / "commerce_actions.json"
+        html_path = output_dir / "commerce_actions_timeline.html"
+        save_commerce_actions(actions, actions_path)
+        save_action_timeline_html(actions, html_path, audio_path=audio_path)
+        source_mode = "recording_cache"
     else:
         settings = CaptioningSettings(
             mode=asr_provider,
@@ -594,13 +622,13 @@ def run_recording_pipeline(
         )
         captions = CaptioningEngine(settings).transcribe()
         paths = write_caption_outputs(captions, output_dir)
+        actions = generate_commerce_actions(captions, session.catalog, session.promotions)
+        actions_path = output_dir / "commerce_actions.json"
+        html_path = output_dir / "commerce_actions_timeline.html"
+        save_commerce_actions(actions, actions_path)
+        save_action_timeline_html(actions, html_path, audio_path=audio_path)
         source_mode = asr_provider
 
-    actions = generate_commerce_actions(captions, session.catalog, session.promotions)
-    actions_path = output_dir / "commerce_actions.json"
-    html_path = output_dir / "commerce_actions_timeline.html"
-    save_commerce_actions(actions, actions_path)
-    save_action_timeline_html(actions, html_path, audio_path=audio_path)
     metrics = caption_metrics(captions)
     return (
         {
@@ -721,15 +749,18 @@ def build_viewer_scene_html(
     actions: Sequence[CommerceAction],
     mode_label: str,
     title: str,
+    show_audio_controls: bool = True,
 ) -> str:
     segments = [segment.to_dict() for segment in captions.segments]
     action_payload = [action.to_dict() for action in actions]
     audio_html = ""
-    if audio_path and audio_path.exists():
+    if audio_path and audio_path.exists() and show_audio_controls:
         audio_html = (
             f'<audio class="lc-audio" controls preload="metadata" '
             f'src="{_audio_data_uri(audio_path)}"></audio>'
         )
+    elif audio_path and audio_path.exists():
+        audio_html = '<div class="lc-no-audio">Playback controls are hidden for live mode</div>'
     else:
         audio_html = '<div class="lc-no-audio">No playback audio for this run</div>'
 
@@ -811,44 +842,153 @@ def save_uploaded_audio(upload_widget: Any, output_dir: Path) -> Optional[Path]:
 def record_colab_mic_clip(output_dir: Path, max_seconds: float = 12.0) -> Path:
     try:
         from google.colab import output  # type: ignore
-        from IPython.display import Javascript, display  # type: ignore
+        from IPython.display import HTML, Javascript, display  # type: ignore
     except ImportError as exc:
         raise RuntimeError("Recording from mic requires Google Colab browser APIs.") from exc
 
     output_dir.mkdir(parents=True, exist_ok=True)
     display(
+        HTML(
+            """
+            <div id="full-demo-mic-recorder" class="lc-mic-recorder">
+              <div class="lc-mic-recorder-head">
+                <div>
+                  <div class="lc-panel-title">Record a voice sample</div>
+                  <div class="lc-muted">Start recording, stop when done, then confirm to run ASR and commerce actions.</div>
+                </div>
+                <div class="lc-recording-time" data-role="time">0.00s</div>
+              </div>
+              <div class="lc-mic-meter"><div data-role="meter"></div></div>
+              <div class="lc-mic-controls">
+                <button data-role="start">Start recording</button>
+                <button data-role="stop" disabled>Stop</button>
+                <button data-role="confirm" disabled>Confirm</button>
+                <button data-role="cancel">Cancel</button>
+              </div>
+              <audio data-role="preview" controls style="display:none;width:100%;margin-top:10px;"></audio>
+              <div class="lc-muted" data-role="status">Waiting for microphone permission.</div>
+            </div>
+            """
+        )
+    )
+    display(
         Javascript(
             """
-            window.recordFullDemoMicClip = async function(maxMilliseconds) {
-              const stream = await navigator.mediaDevices.getUserMedia({audio: true});
-              const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
-                ? 'audio/webm;codecs=opus'
-                : 'audio/webm';
-              return await new Promise((resolve, reject) => {
-                const chunks = [];
-                const recorder = new MediaRecorder(stream, {mimeType});
-                recorder.ondataavailable = event => {
-                  if (event.data && event.data.size > 0) chunks.push(event.data);
-                };
-                recorder.onerror = event => reject(event.error || event);
-                recorder.onstop = () => {
-                  stream.getTracks().forEach(track => track.stop());
-                  const blob = new Blob(chunks, {type: mimeType});
-                  const reader = new FileReader();
-                  reader.onloadend = () => resolve({dataUrl: reader.result, size: blob.size});
-                  reader.onerror = reject;
-                  reader.readAsDataURL(blob);
-                };
-                recorder.start();
-                setTimeout(() => recorder.stop(), Math.max(500, maxMilliseconds));
-              });
-            };
+            (() => {
+              const roots = document.querySelectorAll('#full-demo-mic-recorder');
+              const root = roots[roots.length - 1];
+              const get = role => root.querySelector(`[data-role="${role}"]`);
+              window.fullDemoMicRecorder = window.fullDemoMicRecorder || {};
+              window.fullDemoMicRecorder.recordInteractive = async function(maxMilliseconds) {
+                const maxMs = Math.max(500, Number(maxMilliseconds || 15000));
+                return await new Promise((resolve, reject) => {
+                  let stream = null;
+                  let recorder = null;
+                  let audioContext = null;
+                  let analyser = null;
+                  let timer = null;
+                  let startedAt = null;
+                  let blob = null;
+                  let mimeType = 'audio/webm';
+                  const chunks = [];
+                  const setStatus = text => { get('status').textContent = text; };
+                  const cleanupStream = () => {
+                    if (timer) clearInterval(timer);
+                    timer = null;
+                    if (stream) stream.getTracks().forEach(track => track.stop());
+                    stream = null;
+                    if (audioContext) audioContext.close();
+                    audioContext = null;
+                  };
+                  const updateMeter = () => {
+                    if (!analyser || !startedAt) return;
+                    const waveform = new Uint8Array(analyser.fftSize);
+                    analyser.getByteTimeDomainData(waveform);
+                    let sumSquares = 0;
+                    for (const value of waveform) {
+                      const centered = (value - 128) / 128;
+                      sumSquares += centered * centered;
+                    }
+                    const rms = Math.sqrt(sumSquares / waveform.length);
+                    const elapsed = (performance.now() - startedAt) / 1000;
+                    get('time').textContent = `${elapsed.toFixed(2)}s`;
+                    get('meter').style.width = `${Math.max(2, Math.min(100, rms * 700))}%`;
+                    if (elapsed * 1000 >= maxMs && recorder && recorder.state !== 'inactive') {
+                      recorder.stop();
+                    }
+                  };
+                  const stopRecorder = () => {
+                    if (recorder && recorder.state !== 'inactive') recorder.stop();
+                  };
+                  get('start').onclick = async () => {
+                    try {
+                      stream = await navigator.mediaDevices.getUserMedia({audio: true});
+                      mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+                        ? 'audio/webm;codecs=opus'
+                        : 'audio/webm';
+                      audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                      const source = audioContext.createMediaStreamSource(stream);
+                      analyser = audioContext.createAnalyser();
+                      analyser.fftSize = 1024;
+                      source.connect(analyser);
+                      recorder = new MediaRecorder(stream, {mimeType});
+                      recorder.ondataavailable = event => {
+                        if (event.data && event.data.size > 0) chunks.push(event.data);
+                      };
+                      recorder.onerror = event => reject(event.error || event);
+                      recorder.onstop = () => {
+                        blob = new Blob(chunks, {type: mimeType});
+                        cleanupStream();
+                        const preview = get('preview');
+                        preview.src = URL.createObjectURL(blob);
+                        preview.style.display = 'block';
+                        get('start').disabled = true;
+                        get('stop').disabled = true;
+                        get('confirm').disabled = false;
+                        setStatus('Recording stopped. Preview it, then confirm or cancel.');
+                      };
+                      startedAt = performance.now();
+                      recorder.start();
+                      get('start').disabled = true;
+                      get('stop').disabled = false;
+                      get('confirm').disabled = true;
+                      setStatus('Recording...');
+                      timer = setInterval(updateMeter, 100);
+                    } catch (error) {
+                      cleanupStream();
+                      reject(error);
+                    }
+                  };
+                  get('stop').onclick = stopRecorder;
+                  get('cancel').onclick = () => {
+                    cleanupStream();
+                    resolve({cancelled: true});
+                  };
+                  get('confirm').onclick = () => {
+                    if (!blob) return;
+                    const reader = new FileReader();
+                    reader.onloadend = () => resolve({
+                      dataUrl: reader.result,
+                      mimeType,
+                      size: blob.size,
+                      durationSeconds: startedAt ? (performance.now() - startedAt) / 1000 : null
+                    });
+                    reader.onerror = reject;
+                    reader.readAsDataURL(blob);
+                  };
+                  setStatus('Click Start recording to begin.');
+                });
+              };
+            })();
             """
         )
     )
     payload = output.eval_js(
-        f"window.recordFullDemoMicClip({max(500, int(float(max_seconds) * 1000))})"
+        "window.fullDemoMicRecorder.recordInteractive("
+        f"{max(500, int(float(max_seconds) * 1000))})"
     )
+    if isinstance(payload, dict) and payload.get("cancelled"):
+        raise RuntimeError("microphone recording cancelled")
     if not isinstance(payload, dict) or not payload.get("dataUrl"):
         raise RuntimeError("microphone recording did not return audio")
     _, encoded = str(payload["dataUrl"]).split(",", 1)
@@ -993,15 +1133,22 @@ def _style_block() -> str:
 .lc-form-panel{background:#fff;border:1px solid #d0d5dd;border-radius:8px;padding:10px}
 .lc-defaults,.lc-source-detail,.lc-selected-summary{border:1px solid #eaecf0;border-radius:8px;background:#f9fafb;color:#344054;font-size:12px;line-height:1.45;padding:10px}
 .lc-selected-summary{background:#fff7ed;border-color:#fed7aa;color:#7c2d12}
-.lc-source-thumb{height:94px;border-radius:8px;display:flex;align-items:center;justify-content:center;overflow:hidden;margin-bottom:8px;border:1px solid #e5e7eb;position:relative}
-.lc-source-thumb:before{content:"";position:absolute;inset:0;background:linear-gradient(135deg,rgba(255,255,255,.12),rgba(255,255,255,0))}
-.lc-source-thumb span{position:relative;display:flex;align-items:center;justify-content:center;width:54px;height:54px;border-radius:50%;background:rgba(255,255,255,.88);color:#111827;font-weight:900}
-.lc-source-thumb-beauty{background:#fecaca}
-.lc-source-thumb-tech{background:#bae6fd}
-.lc-source-thumb-upload{background:#d9f99d}
-.lc-source-thumb-mic{background:#ddd6fe}
+.lc-source-icon-wrap{height:58px;display:flex;align-items:center;justify-content:center;margin-bottom:8px}
+.lc-source-icon-wrap span{display:flex;align-items:center;justify-content:center;width:46px;height:46px;border-radius:50%;background:#fff7ed;color:#b42318;border:1px solid #fed7aa;font-size:20px}
 .lc-source-caption{font-size:12px;color:#667085;line-height:1.3;min-height:30px;text-align:center}
 .lc-source-button{border-radius:8px!important;font-weight:800!important}
+.lc-upload-panel{display:grid;grid-template-columns:42px minmax(0,1fr);gap:10px;align-items:center;border:1px dashed #d0d5dd;border-radius:8px;background:#f9fafb;color:#344054;padding:12px}
+.lc-source-icon{width:42px;height:42px;border-radius:50%;background:#fff7ed;color:#b42318;display:flex;align-items:center;justify-content:center;font-weight:900}
+.lc-mic-recorder{border:1px solid #d0d5dd;border-radius:8px;padding:14px;background:#fff;color:#111827;box-shadow:0 8px 24px rgba(16,24,40,.06)}
+.lc-mic-recorder-head{display:flex;justify-content:space-between;gap:12px;align-items:flex-start;margin-bottom:12px}
+.lc-recording-time{border:1px solid #fed7aa;border-radius:999px;background:#fff7ed;color:#7c2d12;padding:6px 10px;font-weight:800}
+.lc-mic-meter{height:10px;background:#f2f4f7;border-radius:999px;overflow:hidden;margin-bottom:12px}
+.lc-mic-meter div{height:100%;width:0%;background:#b42318}
+.lc-mic-controls{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:10px}
+.lc-mic-controls button{border:0;border-radius:8px;padding:9px 12px;font-weight:800;cursor:pointer}
+.lc-mic-controls button[data-role=start],.lc-mic-controls button[data-role=confirm]{background:#b42318;color:#fff}
+.lc-mic-controls button[data-role=stop],.lc-mic-controls button[data-role=cancel]{background:#f2f4f7;color:#344054}
+.lc-mic-controls button:disabled{opacity:.5;cursor:not-allowed}
 .lc-viewer{display:grid;grid-template-columns:minmax(0,1.25fr) minmax(260px,.75fr);gap:14px;border:1px solid #d0d5dd;border-radius:8px;padding:14px;background:#fff;margin-bottom:12px;box-shadow:0 8px 24px rgba(16,24,40,.06)}
 .lc-video-art{height:390px;background:#171717;border-radius:8px;position:relative;overflow:hidden}
 .lc-video-art:before{content:"";position:absolute;inset:0;background:linear-gradient(145deg,#171717 0%,#7f1d1d 54%,#0f766e 100%)}
