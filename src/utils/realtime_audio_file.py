@@ -25,7 +25,6 @@ from src.ai.decision import CommerceDecisionProvider
 from src.data.catalog import load_product_catalog, load_promotions
 from src.schemas import CaptionResult, CaptionSegment
 from src.ai.captioning import save_caption_json
-from src.utils.live_display import display_stream_state_panel
 
 
 @dataclass(frozen=True)
@@ -331,7 +330,6 @@ def run_realtime_audio_file_demo(
     skipped_chunks = 0
     max_backlog = 0
     stopped_by_user = False
-    display_key = f"realtime_audio_file_stream_panel_{uuid.uuid4().hex}"
 
     for index, window in enumerate(audio_windows, start=1):
         if cancel_event and cancel_event.is_set():
@@ -379,21 +377,6 @@ def run_realtime_audio_file_demo(
             )
             save_caption_json(caption_result, captions_path)
             save_commerce_actions(live_actions, actions_path)
-            _display_realtime_file_state(
-                index=index,
-                total=len(audio_windows),
-                window=window,
-                chunk_path=None,
-                current_time=current_time,
-                queue_depth=backlog,
-                segments=live_segments,
-                actions=live_actions,
-                state_label="Skipped Silence",
-                detail="This chunk was below the silence threshold, so ASR and action generation were skipped.",
-                audio_stats=audio_stats,
-                skipped_chunks=skipped_chunks,
-                display_key=display_key,
-            )
             gate.publish(
                 {
                     "state": "skipped_silence",
@@ -410,6 +393,7 @@ def run_realtime_audio_file_demo(
                     "actionCount": len(live_actions),
                     "rms": audio_stats["rms"],
                     "peak": audio_stats["peak"],
+                    **_realtime_file_result_payload(live_segments, live_actions),
                 }
             )
             continue
@@ -453,20 +437,6 @@ def run_realtime_audio_file_demo(
         )
         save_caption_json(caption_result, captions_path)
         save_commerce_actions(live_actions, actions_path)
-        _display_realtime_file_state(
-            index=index,
-            total=len(audio_windows),
-            window=window,
-            chunk_path=chunk_path,
-            current_time=current_time,
-            queue_depth=backlog,
-            segments=live_segments,
-            actions=live_actions,
-            state_label="Transcribing",
-            audio_stats=audio_stats,
-            skipped_chunks=skipped_chunks,
-            display_key=display_key,
-        )
         gate.publish(
             {
                 "state": "completed",
@@ -481,6 +451,7 @@ def run_realtime_audio_file_demo(
                 "totalChunks": len(audio_windows),
                 "captionCount": len(live_segments),
                 "actionCount": len(live_actions),
+                **_realtime_file_result_payload(live_segments, live_actions),
             }
         )
 
@@ -495,6 +466,24 @@ def run_realtime_audio_file_demo(
         "captions_json": str(captions_path),
         "actions_json": str(actions_path),
         "chunk_dir": str(chunk_dir),
+    }
+
+
+def _realtime_file_result_payload(
+    segments: Sequence[CaptionSegment],
+    actions: Sequence[Any],
+) -> Dict[str, Any]:
+    return {
+        "latestCaption": segments[-1].text if segments else "",
+        "actionRows": [
+            {
+                "time": round(action.timestamp, 2),
+                "action": action.action_type,
+                "title": action.display_payload.get("title", action.action_type),
+                "skus": " + ".join(action.skus),
+            }
+            for action in actions[-6:]
+        ],
     }
 
 
@@ -617,17 +606,23 @@ def _build_realtime_audio_file_html(
     #{widget_id} .rt-head{{width:76px;height:76px;border-radius:50%;background:#fff7ed;margin:0 auto 8px;border:5px solid rgba(255,255,255,.42)}}
     #{widget_id} .rt-body{{width:150px;height:130px;border-radius:42px 42px 10px 10px;background:#ef4444;margin:0 auto;box-shadow:0 18px 60px rgba(0,0,0,.28)}}
     #{widget_id} .rt-caption{{position:absolute;left:18px;right:18px;bottom:18px;background:rgba(17,24,39,.88);color:#fff;border-radius:8px;padding:13px;font-size:16px;line-height:1.4}}
-    #{widget_id} .rt-panel-title{{font-weight:800;font-size:17px;color:#111827;margin-bottom:8px}}
+    #{widget_id} .rt-panel-title{{font-weight:800;font-size:24px;line-height:1.16;color:#111827;margin-bottom:10px}}
     #{widget_id} .rt-muted{{color:#667085;font-size:12px;line-height:1.4}}
-    #{widget_id} .rt-metrics{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin:12px 0}}
-    #{widget_id} .rt-metric{{border:1px solid #eaecf0;border-radius:8px;padding:10px;background:#f9fafb}}
-    #{widget_id} .rt-metric strong{{display:block;color:#111827;margin-top:3px}}
-    #{widget_id} .rt-buttons{{display:flex;gap:8px;margin:10px 0}}
+    #{widget_id} .rt-bottom{{display:grid;grid-template-columns:48px minmax(0,1fr);gap:10px;align-items:center;margin-top:10px}}
     #{widget_id} button{{border:0;border-radius:8px;padding:10px 13px;font-weight:800;cursor:pointer}}
     #{widget_id} [data-role=start]{{background:#b42318;color:#fff;width:48px;height:42px;display:inline-flex;align-items:center;justify-content:center;font-size:18px}}
     #{widget_id} button:disabled{{opacity:.5;cursor:not-allowed}}
-    #{widget_id} .rt-progress{{height:10px;background:#f2f4f7;border-radius:999px;overflow:hidden;margin-top:8px}}
+    #{widget_id} .rt-progress{{height:10px;background:#f2f4f7;border-radius:999px;overflow:hidden}}
     #{widget_id} .rt-progress div{{height:100%;width:0%;background:#e51b23}}
+    #{widget_id} .rt-stats{{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}}
+    #{widget_id} .rt-stats span{{background:#f2f4f7;border-radius:999px;padding:5px 10px;font-size:13px;color:#344054}}
+    #{widget_id} .rt-actions{{display:flex;flex-direction:column;gap:10px}}
+    #{widget_id} .rt-action-card{{border:1px solid #d0d5dd;border-radius:8px;padding:12px;background:#fff;color:#111827;box-shadow:0 2px 8px rgba(16,24,40,.04)}}
+    #{widget_id} .rt-action-type{{font-size:11px;color:#b42318;font-weight:900;margin-bottom:5px;letter-spacing:.04em}}
+    #{widget_id} .rt-action-title{{font-size:16px;font-weight:800;margin-bottom:4px}}
+    #{widget_id} .rt-action-meta{{font-size:14px;color:#111827;line-height:1.35}}
+    #{widget_id} .rt-action-time{{font-size:12px;color:#667085;margin-top:6px}}
+    #{widget_id} .rt-empty{{border:1px solid #d0d5dd;border-radius:8px;padding:12px;color:#667085;background:#fff}}
     @media (max-width: 900px){{#{widget_id} .rt-grid{{grid-template-columns:1fr}}}}
   </style>
   <audio preload="metadata" src="{_audio_data_uri(audio_path)}" style="display:none;"></audio>
@@ -635,23 +630,20 @@ def _build_realtime_audio_file_html(
     <div>
       <div class="rt-video">
         <div class="rt-host"><div class="rt-head"></div><div class="rt-body"></div></div>
-        <div class="rt-caption" data-role="caption">Press Start to begin the simulated live stream.</div>
+        <div class="rt-caption" data-role="caption">Waiting for live transcript...</div>
       </div>
-      <div class="rt-progress"><div data-role="progress"></div></div>
+      <div class="rt-bottom">
+        <button data-role="start" disabled title="Start stream" aria-label="Start stream">&#9654;</button>
+        <div class="rt-progress"><div data-role="progress"></div></div>
+      </div>
     </div>
     <div>
-      <div class="rt-panel-title">Live Audio Stream</div>
-      <div class="rt-muted">Audio is released to ASR only as stream time advances. Seeking is disabled for this demo.</div>
-      <div class="rt-buttons">
-        <button data-role="start" disabled title="Start stream" aria-label="Start stream">&#9654;</button>
+      <div class="rt-panel-title">Live ASR + action preview</div>
+      <div class="rt-stats">
+        <span data-role="caption-count">0 captions</span>
+        <span data-role="action-count">0 actions</span>
       </div>
-      <div class="rt-metrics">
-        <div class="rt-metric"><div class="rt-muted">Playback</div><strong data-role="time">0.00s / {duration:.2f}s</strong></div>
-        <div class="rt-metric"><div class="rt-muted">State</div><strong data-role="state">ready</strong></div>
-        <div class="rt-metric"><div class="rt-muted">Chunk</div><strong data-role="chunk">-</strong></div>
-        <div class="rt-metric"><div class="rt-muted">Queue</div><strong data-role="queue">0</strong></div>
-      </div>
-      <div class="rt-muted" data-role="detail">Start the stream to release the first chunk.</div>
+      <div data-role="actions" class="rt-actions"><div class="rt-empty">No actions emitted yet.</div></div>
     </div>
   </div>
 </div>
@@ -699,6 +691,7 @@ def _build_realtime_audio_file_js(
     let ticker = null;
     let pendingStartResolve = null;
     let readyToStart = false;
+    let latestCaption = "";
 
     const duration = () => {{
       const audioDuration = audio && audio.duration && Number.isFinite(audio.duration) ? audio.duration : 0;
@@ -714,6 +707,41 @@ def _build_realtime_audio_file_js(
       const detail = get("detail");
       if (detail) detail.textContent = text;
     }};
+    const setState = text => {{
+      const state = get("state");
+      if (state) state.textContent = text;
+    }};
+    const setCaptionStatus = text => {{
+      if (!latestCaption) get("caption").textContent = text;
+    }};
+    const escapeHtml = value => String(value ?? "").replace(/[&<>"']/g, ch => ({{
+      "&": "&amp;",
+      "<": "&lt;",
+      ">": "&gt;",
+      '"': "&quot;",
+      "'": "&#39;"
+    }}[ch]));
+    const humanActionTitle = value => String(value || "Action")
+      .toLowerCase()
+      .replace(/_/g, " ")
+      .replace(/\\b\\w/g, match => match.toUpperCase());
+    const renderActions = rows => {{
+      const target = get("actions");
+      if (!target) return;
+      const items = Array.isArray(rows) ? rows : [];
+      if (!items.length) {{
+        target.innerHTML = '<div class="rt-empty">No actions emitted yet.</div>';
+        return;
+      }}
+      target.innerHTML = items.slice(-6).map(action => `
+        <div class="rt-action-card">
+          <div class="rt-action-type">${{escapeHtml(action.action || "ACTION")}}</div>
+          <div class="rt-action-title">${{escapeHtml(action.title || humanActionTitle(action.action))}}</div>
+          <div class="rt-action-meta">${{escapeHtml(action.skus || "-")}}</div>
+          <div class="rt-action-time">${{escapeHtml(Number(action.time || 0).toFixed(2))}}s</div>
+        </div>
+      `).join("");
+    }};
     const updateTime = () => {{
       const total = duration();
       const current = streamTime();
@@ -726,8 +754,7 @@ def _build_realtime_audio_file_js(
         baseSeconds = total;
         if (ticker) window.clearTimeout(ticker);
         ticker = null;
-        const state = get("state");
-        if (state) state.textContent = "ended";
+        setState("ended");
         setDetail("Live replay finished.");
       }}
     }};
@@ -768,8 +795,8 @@ def _build_realtime_audio_file_js(
       baseSeconds = streamTime();
       startedAtMs = performance.now();
       playing = true;
-      get("state").textContent = "playing";
-      get("caption").textContent = "Streaming audio into ASR...";
+      setState("playing");
+      setCaptionStatus("Streaming audio into ASR...");
       setDetail("Playback clock started. Chunks are released by stream time.");
       if (audio) {{
         const playResult = audio.play();
@@ -792,8 +819,8 @@ def _build_realtime_audio_file_js(
       if (ticker) window.clearTimeout(ticker);
       ticker = null;
       if (audio) audio.pause();
-      get("state").textContent = "paused";
-      get("caption").textContent = "Stream paused. Resume to release more chunks.";
+      setState("paused");
+      setCaptionStatus("Waiting for live transcript...");
       setDetail("Input is paused. ASR waits until stream time advances again.");
       updateTime();
       setToggleButton();
@@ -809,7 +836,7 @@ def _build_realtime_audio_file_js(
       if (ticker) window.clearTimeout(ticker);
       ticker = null;
       if (audio) audio.pause();
-      get("state").textContent = "stopped";
+      setState("stopped");
       setDetail("Input stopped. Already released chunks will finish processing.");
       updateTime();
       setToggleButton();
@@ -827,7 +854,7 @@ def _build_realtime_audio_file_js(
       getStatus,
       waitForStart() {{
         updateTime();
-        get("state").textContent = "waiting_for_start";
+        setState("waiting_for_start");
         setDetail("Press Start to begin the simulated live stream.");
         if (stopRequested || playing || streamTime() > 0) return Promise.resolve(getStatus());
         return new Promise(resolve => {{
@@ -836,7 +863,7 @@ def _build_realtime_audio_file_js(
       }},
       waitUntil(targetSeconds) {{
         updateTime();
-        get("state").textContent = "waiting_for_playback";
+        setState("waiting_for_playback");
         setDetail(`Waiting until stream reaches ${{Number(targetSeconds).toFixed(2)}}s.`);
         return new Promise(resolve => {{
           const check = () => {{
@@ -852,7 +879,7 @@ def _build_realtime_audio_file_js(
       }},
       publish(payload) {{
         updateTime();
-        if (payload.state) get("state").textContent = payload.state;
+        if (payload.state) setState(payload.state);
         if (payload.state === "loading_asr") {{
           readyToStart = false;
           setToggleButton();
@@ -861,9 +888,19 @@ def _build_realtime_audio_file_js(
           readyToStart = true;
           setToggleButton();
         }}
-        if (payload.chunkIndex) get("chunk").textContent = `${{payload.chunkIndex}} / ${{payload.totalChunks || "?"}}`;
-        if (payload.queueDepth !== undefined) get("queue").textContent = String(payload.queueDepth);
-        if (payload.status) get("caption").textContent = payload.status;
+        if (payload.latestCaption) {{
+          latestCaption = String(payload.latestCaption);
+          get("caption").textContent = latestCaption;
+        }}
+        const captionCount = get("caption-count");
+        if (captionCount && payload.captionCount !== undefined) {{
+          captionCount.textContent = `${{payload.captionCount}} captions`;
+        }}
+        const actionCount = get("action-count");
+        if (actionCount && payload.actionCount !== undefined) {{
+          actionCount.textContent = `${{payload.actionCount}} actions`;
+        }}
+        if (payload.actionRows) renderActions(payload.actionRows);
         const detail = [];
         if (payload.status) detail.push(payload.status);
         if (payload.chunkStart !== undefined && payload.chunkEnd !== undefined) {{
@@ -876,7 +913,7 @@ def _build_realtime_audio_file_js(
       }}
     }};
     if (audio) audio.addEventListener("loadedmetadata", updateTime);
-    get("state").textContent = "ready";
+    setState("ready");
     setDetail("Loading ASR before stream controls are enabled.");
     updateTime();
     setToggleButton();
@@ -920,63 +957,3 @@ new Promise((resolve) => {{
   callWhenReady();
 }})
 """
-
-
-def _display_realtime_file_state(
-    index: int,
-    total: int,
-    window: AudioWindow,
-    chunk_path: Optional[Path],
-    current_time: float,
-    queue_depth: int,
-    segments: Sequence[CaptionSegment],
-    actions: Sequence[Any],
-    state_label: str = "Transcribing",
-    detail: Optional[str] = None,
-    audio_stats: Optional[Dict[str, float]] = None,
-    skipped_chunks: int = 0,
-    display_key: Optional[str] = None,
-) -> None:
-    audio_stats = audio_stats or {"rms": None, "peak": None}
-    caption_rows = [
-        {
-            "start": round(segment.start, 2),
-            "end": round(segment.end, 2),
-            "text": segment.text,
-            "source": segment.source,
-        }
-        for segment in segments[-8:]
-    ]
-    action_rows = [
-        {
-            "time": round(action.timestamp, 2),
-            "action": action.action_type,
-            "title": action.display_payload.get("title", action.action_type),
-            "skus": " + ".join(action.skus),
-            "confidence": action.confidence,
-        }
-        for action in actions[-8:]
-    ]
-    metrics = {
-        "Chunk": f"{index}/{total}",
-        "Playback": f"{current_time:.2f}s",
-        "Window": f"{window.start:.2f}-{window.end:.2f}s",
-        "Queue": queue_depth,
-        "Captions": len(segments),
-        "Actions": len(actions),
-        "Skipped": skipped_chunks,
-        "RMS": audio_stats.get("rms"),
-        "Peak": audio_stats.get("peak"),
-    }
-    if chunk_path is not None:
-        metrics["Chunk file"] = chunk_path.name
-    display_stream_state_panel(
-        title="Real-Time Audio File Stream",
-        state_label=state_label,
-        metrics=metrics,
-        captions=caption_rows,
-        actions=action_rows,
-        detail=detail,
-        accent="#a33b2f" if "Skip" not in state_label else "#b45309",
-        display_key=display_key or "realtime_audio_file_stream_panel",
-    )

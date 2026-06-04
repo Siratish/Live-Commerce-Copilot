@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Callable, Dict, List, Optional, Sequence
 import base64
 import json
 import queue
@@ -24,7 +24,6 @@ from src.ai.commerce_actions import generate_commerce_actions, save_commerce_act
 from src.ai.decision import CommerceDecisionProvider
 from src.data.catalog import load_product_catalog, load_promotions
 from src.schemas import CaptionResult, CaptionSegment, repair_caption_timestamps
-from src.utils.live_display import display_stream_state_panel
 
 
 @dataclass(frozen=True)
@@ -308,6 +307,7 @@ def run_colab_live_mic_demo(
     decision_provider: Optional[CommerceDecisionProvider] = None,
     chunk_source: Optional[BrowserMicChunkSource] = None,
     asr: Optional[Any] = None,
+    result_sink: Optional[Callable[[Sequence[CaptionSegment], Sequence[Any], Dict[str, Any]], None]] = None,
     cancel_event: Optional[threading.Event] = None,
 ) -> Dict[str, Any]:
     """Record browser mic chunks in Colab, transcribe them, and emit actions."""
@@ -388,6 +388,7 @@ def run_colab_live_mic_demo(
                     live_segments=live_segments,
                     elapsed_seconds=elapsed_seconds,
                     display_key=display_key,
+                    result_sink=result_sink,
                 )
                 if skipped:
                     skipped_chunks += 1
@@ -439,6 +440,7 @@ def run_colab_live_mic_demo(
                     live_segments=live_segments,
                     elapsed_seconds=elapsed_seconds,
                     display_key=display_key,
+                    result_sink=result_sink,
                 )
                 if skipped:
                     skipped_chunks += 1
@@ -486,6 +488,7 @@ def _process_live_mic_payload(
     live_segments: Sequence[CaptionSegment],
     elapsed_seconds: float,
     display_key: Optional[str] = None,
+    result_sink: Optional[Callable[[Sequence[CaptionSegment], Sequence[Any], Dict[str, Any]], None]] = None,
 ) -> tuple[List[CaptionSegment], List[Any], float, Optional[Path], bool]:
     duration_seconds = float(payload.get("durationSeconds") or config.chunk_seconds)
     chunk_path = chunk_dir / f"mic_chunk_{max(0, chunk_number - 1):03d}.webm"
@@ -524,21 +527,26 @@ def _process_live_mic_payload(
                 "speechDetected": audio_stats.get("speechDetected"),
             }
         )
-        _display_live_state(
-            chunk_index=chunk_number - 1,
-            config=config,
-            segments=repaired_segments,
-            actions=live_actions,
-            chunk_path=None,
-            queue_status={
-                "queueDepth": payload.get("queueDepth"),
-                "droppedChunks": payload.get("droppedChunks"),
-            },
-            state_label="Skipped Silence",
-            detail="This mic chunk did not contain detected speech, so ASR and action generation were skipped.",
-            audio_stats=audio_stats,
-            display_key=display_key,
-        )
+        metadata = {
+            "queueDepth": payload.get("queueDepth"),
+            "droppedChunks": payload.get("droppedChunks"),
+            "state": "skipped_silence",
+        }
+        if result_sink is not None:
+            result_sink(repaired_segments, live_actions, metadata)
+        else:
+            _display_live_state(
+                chunk_index=chunk_number - 1,
+                config=config,
+                segments=repaired_segments,
+                actions=live_actions,
+                chunk_path=None,
+                queue_status=metadata,
+                state_label="Skipped Silence",
+                detail="This mic chunk did not contain detected speech, so ASR and action generation were skipped.",
+                audio_stats=audio_stats,
+                display_key=display_key,
+            )
         return repaired_segments, live_actions, next_elapsed_seconds, None, True
 
     _write_data_url(payload["dataUrl"], chunk_path)
@@ -577,20 +585,25 @@ def _process_live_mic_payload(
     )
     save_caption_json(caption_result, config.output_dir / "live_mic_captions.json")
     save_commerce_actions(live_actions, config.output_dir / "live_mic_actions.json")
-    _display_live_state(
-        chunk_index=chunk_number - 1,
-        config=config,
-        segments=repaired_segments,
-        actions=live_actions,
-        chunk_path=chunk_path,
-        queue_status={
-            "queueDepth": payload.get("queueDepth"),
-            "droppedChunks": payload.get("droppedChunks"),
-        },
-        state_label="Transcribing",
-        audio_stats=audio_stats,
-        display_key=display_key,
-    )
+    metadata = {
+        "queueDepth": payload.get("queueDepth"),
+        "droppedChunks": payload.get("droppedChunks"),
+        "state": "transcribing",
+    }
+    if result_sink is not None:
+        result_sink(repaired_segments, live_actions, metadata)
+    else:
+        _display_live_state(
+            chunk_index=chunk_number - 1,
+            config=config,
+            segments=repaired_segments,
+            actions=live_actions,
+            chunk_path=chunk_path,
+            queue_status=metadata,
+            state_label="Transcribing",
+            audio_stats=audio_stats,
+            display_key=display_key,
+        )
     return repaired_segments, live_actions, next_elapsed_seconds, chunk_path, False
 
 
@@ -1131,43 +1144,43 @@ def install_colab_live_mic_debug_panel(
                 #live-commerce-mic-debug .lm-head{width:76px;height:76px;border-radius:50%;background:#fff7ed;margin:0 auto 8px;border:5px solid rgba(255,255,255,.42)}
                 #live-commerce-mic-debug .lm-body{width:150px;height:130px;border-radius:42px 42px 10px 10px;background:#ef4444;margin:0 auto;box-shadow:0 18px 60px rgba(0,0,0,.28)}
                 #live-commerce-mic-debug .lm-caption{position:absolute;left:18px;right:18px;bottom:18px;background:rgba(17,24,39,.88);color:#fff;border-radius:8px;padding:13px;font-size:16px;line-height:1.4}
-                #live-commerce-mic-debug .lm-title{font-weight:800;font-size:17px;color:#111827;margin-bottom:8px}
+                #live-commerce-mic-debug .lm-title{font-weight:800;font-size:24px;line-height:1.16;color:#111827;margin-bottom:10px}
                 #live-commerce-mic-debug .lm-muted{color:#667085;font-size:12px;line-height:1.4}
-                #live-commerce-mic-debug .lm-metrics{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin:12px 0}
-                #live-commerce-mic-debug .lm-metric{border:1px solid #eaecf0;border-radius:8px;padding:10px;background:#f9fafb}
-                #live-commerce-mic-debug .lm-metric strong{display:block;color:#111827;margin-top:3px}
-                #live-commerce-mic-debug .lm-buttons{display:flex;gap:8px;margin:10px 0}
+                #live-commerce-mic-debug .lm-bottom{display:grid;grid-template-columns:48px minmax(0,1fr);gap:10px;align-items:center;margin-top:10px}
                 #live-commerce-mic-debug button{border:0;border-radius:8px;width:48px;height:42px;font-size:18px;font-weight:800;cursor:pointer;display:inline-flex;align-items:center;justify-content:center}
                 #live-commerce-mic-debug #mic-debug-start{background:#b42318;color:#fff}
                 #live-commerce-mic-debug button:disabled{opacity:.5;cursor:not-allowed}
-                #live-commerce-mic-debug .lm-meter{height:10px;background:#f2f4f7;border-radius:999px;overflow:hidden;margin-top:8px}
+                #live-commerce-mic-debug .lm-meter{height:10px;background:#f2f4f7;border-radius:999px;overflow:hidden}
                 #live-commerce-mic-debug .lm-meter div{height:100%;width:0%;background:#12b76a}
+                #live-commerce-mic-debug .lm-stats{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}
+                #live-commerce-mic-debug .lm-stats span{background:#f2f4f7;border-radius:999px;padding:5px 10px;font-size:13px;color:#344054}
+                #live-commerce-mic-debug .lm-actions{display:flex;flex-direction:column;gap:10px}
+                #live-commerce-mic-debug .lm-action-card{border:1px solid #d0d5dd;border-radius:8px;padding:12px;background:#fff;color:#111827;box-shadow:0 2px 8px rgba(16,24,40,.04)}
+                #live-commerce-mic-debug .lm-action-type{font-size:11px;color:#b42318;font-weight:900;margin-bottom:5px;letter-spacing:.04em}
+                #live-commerce-mic-debug .lm-action-title{font-size:16px;font-weight:800;margin-bottom:4px}
+                #live-commerce-mic-debug .lm-action-meta{font-size:14px;color:#111827;line-height:1.35}
+                #live-commerce-mic-debug .lm-action-time{font-size:12px;color:#667085;margin-top:6px}
+                #live-commerce-mic-debug .lm-empty{border:1px solid #d0d5dd;border-radius:8px;padding:12px;color:#667085;background:#fff}
                 @media (max-width: 900px){#live-commerce-mic-debug .lm-grid{grid-template-columns:1fr}}
               </style>
               <div class="lm-grid">
                 <div>
                   <div class="lm-video">
                     <div class="lm-host"><div class="lm-head"></div><div class="lm-body"></div></div>
-                    <div class="lm-caption" id="mic-debug-caption">Press Start to begin sending mic audio to ASR.</div>
+                    <div class="lm-caption" id="mic-debug-caption">Waiting for live transcript...</div>
                   </div>
-                  <div class="lm-meter"><div id="mic-debug-meter"></div></div>
+                  <div class="lm-bottom">
+                    <button id="mic-debug-start" disabled title="Enable mic input" aria-label="Enable mic input">&#127908;</button>
+                    <div class="lm-meter"><div id="mic-debug-meter"></div></div>
+                  </div>
                 </div>
                 <div>
-                  <div class="lm-title">Live Microphone Stream</div>
-                  <div class="lm-muted">Stop closes the input; queued chunks still finish processing.</div>
-                  <div class="lm-buttons">
-                    <button id="mic-debug-start" disabled title="Enable mic input" aria-label="Enable mic input">&#127908;</button>
+                  <div class="lm-title">Live ASR + action preview</div>
+                  <div class="lm-stats">
+                    <span id="mic-debug-caption-count">0 captions</span>
+                    <span id="mic-debug-action-count">0 actions</span>
                   </div>
-                  <div class="lm-metrics">
-                    <div class="lm-metric"><div class="lm-muted">Chunk</div><strong id="mic-debug-chunk">-</strong></div>
-                    <div class="lm-metric"><div class="lm-muted">Detector</div><strong id="mic-debug-status">waiting</strong></div>
-                    <div class="lm-metric"><div class="lm-muted">State</div><strong id="mic-debug-state">idle</strong></div>
-                    <div class="lm-metric"><div class="lm-muted">Elapsed</div><strong id="mic-debug-elapsed">0.00s</strong></div>
-                    <div class="lm-metric"><div class="lm-muted">Volume RMS</div><strong id="mic-debug-rms">0.0000</strong></div>
-                    <div class="lm-metric"><div class="lm-muted">Threshold</div><strong id="mic-debug-threshold">-</strong></div>
-                  </div>
-                  <div id="mic-debug-silence" class="lm-muted">Silence For 0.00s</div>
-                  <div id="mic-debug-detail" class="lm-muted" style="margin-top:8px;">Waiting for mic input.</div>
+                  <div id="mic-debug-actions" class="lm-actions"><div class="lm-empty">No actions emitted yet.</div></div>
                 </div>
               </div>
             </div>
@@ -1190,6 +1203,34 @@ def install_colab_live_mic_debug_panel(
                 const roots = document.querySelectorAll('#live-commerce-mic-debug');
                 return roots.length ? roots[roots.length - 1] : null;
               };
+              const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, ch => ({
+                '&': '&amp;',
+                '<': '&lt;',
+                '>': '&gt;',
+                '"': '&quot;',
+                "'": '&#39;'
+              }[ch]));
+              const humanActionTitle = value => String(value || 'Action')
+                .toLowerCase()
+                .replace(/_/g, ' ')
+                .replace(/\b\w/g, match => match.toUpperCase());
+              const renderActions = (root, rows) => {
+                const target = root.querySelector('#mic-debug-actions');
+                if (!target) return;
+                const items = Array.isArray(rows) ? rows : [];
+                if (!items.length) {
+                  target.innerHTML = '<div class="lm-empty">No actions emitted yet.</div>';
+                  return;
+                }
+                target.innerHTML = items.slice(-6).map(action => `
+                  <div class="lm-action-card">
+                    <div class="lm-action-type">${escapeHtml(action.action || 'ACTION')}</div>
+                    <div class="lm-action-title">${escapeHtml(action.title || humanActionTitle(action.action))}</div>
+                    <div class="lm-action-meta">${escapeHtml(action.skus || '-')}</div>
+                    <div class="lm-action-time">${escapeHtml(Number(action.time || 0).toFixed(2))}s</div>
+                  </div>
+                `).join('');
+              };
               const bindControls = () => {
                 const root = latestRoot();
                 if (!root) return;
@@ -1201,7 +1242,8 @@ def install_colab_live_mic_debug_panel(
                   const active = debugState === 'recording'
                     || debugState === 'buffering'
                     || debugState === 'queued'
-                    || debugState === 'transcribing';
+                    || debugState === 'transcribing'
+                    || (state.startRequested && !state.stopRequested && debugState !== 'ready');
                   const stopped = state.stopRequested || debugState === 'stopped';
                   const ready = debugState === 'ready';
                   if (!startButton) return;
@@ -1218,7 +1260,8 @@ def install_colab_live_mic_debug_panel(
                     const active = debugState === 'recording'
                       || debugState === 'buffering'
                       || debugState === 'queued'
-                      || debugState === 'transcribing';
+                      || debugState === 'transcribing'
+                      || (state.startRequested && !state.stopRequested && debugState !== 'ready');
                     if (active) {
                       if (typeof state.stop === 'function') state.stop();
                       if (typeof state.emitCallback === 'function') {
@@ -1280,34 +1323,26 @@ def install_colab_live_mic_debug_panel(
                 const threshold = Number(payload.threshold || 0);
                 const status = payload.status || 'waiting';
                 const isSpeech = status === 'speech';
-                const isSilence = status === 'silence';
                 const meterPct = Math.max(0, Math.min(100, (rms / Math.max(threshold || 0.001, 0.001)) * 70));
-                get('mic-debug-chunk').textContent = payload.chunkIndex ? String(payload.chunkIndex) : '-';
-                get('mic-debug-status').textContent = status;
-                get('mic-debug-status').style.color = isSpeech ? '#027a48' : (isSilence ? '#b42318' : '#344054');
-                get('mic-debug-state').textContent = payload.state || 'idle';
-                get('mic-debug-rms').textContent = rms.toFixed(4);
-                get('mic-debug-threshold').textContent = threshold ? threshold.toFixed(4) : '-';
-                get('mic-debug-elapsed').textContent = `${Number(payload.elapsedSeconds || payload.durationSeconds || 0).toFixed(2)}s`;
-                get('mic-debug-silence').textContent = `Silence For ${Number(payload.silenceSeconds || 0).toFixed(2)}s`;
                 get('mic-debug-meter').style.width = `${meterPct}%`;
                 get('mic-debug-meter').style.background = isSpeech ? '#12b76a' : '#f04438';
                 const caption = get('mic-debug-caption');
                 if (caption) {
-                  caption.textContent = payload.state === 'transcribing'
-                    ? 'Transcribing latest mic chunk...'
-                    : (isSpeech ? 'Receiving speech from microphone...' : (isSilence ? 'Listening for speech pause...' : (payload.status || 'Waiting for mic input.')));
+                  if (payload.latestCaption) {
+                    caption.textContent = payload.latestCaption;
+                  } else if (payload.state === 'ready') {
+                    caption.textContent = 'Waiting for live transcript...';
+                  } else if (payload.state === 'loading_asr') {
+                    caption.textContent = 'Preparing ASR model...';
+                  }
                 }
-                const detailParts = [];
-                if (payload.maxSeconds) detailParts.push(`max ${Number(payload.maxSeconds).toFixed(1)}s`);
-                if (payload.minSeconds) detailParts.push(`min ${Number(payload.minSeconds).toFixed(1)}s`);
-                if (payload.pauseSeconds) detailParts.push(`pause ${Number(payload.pauseSeconds).toFixed(1)}s`);
-                if (payload.queueDepth !== undefined) detailParts.push(`queue ${payload.queueDepth}`);
-                if (payload.droppedChunks !== undefined) detailParts.push(`dropped ${payload.droppedChunks}`);
-                if (payload.size) detailParts.push(`${payload.size} bytes`);
-                if (payload.captionCount !== undefined) detailParts.push(`${payload.captionCount} captions`);
-                if (payload.actionCount !== undefined) detailParts.push(`${payload.actionCount} actions`);
-                get('mic-debug-detail').textContent = detailParts.join(' | ') || 'Waiting for mic input.';
+                if (payload.captionCount !== undefined) {
+                  get('mic-debug-caption-count').textContent = `${payload.captionCount} captions`;
+                }
+                if (payload.actionCount !== undefined) {
+                  get('mic-debug-action-count').textContent = `${payload.actionCount} actions`;
+                }
+                if (payload.actionRows) renderActions(root, payload.actionRows);
                 bindControls();
               };
               state.publishDebug = state.publishDebug || function(payload) {
@@ -1363,45 +1398,26 @@ def _display_live_state(
 ) -> None:
     max_chunks_label = "open" if config.max_chunks is None else str(config.max_chunks)
     queue_status = queue_status or {}
-    audio_stats = audio_stats or {}
-    caption_rows = [
-        {
-            "start": round(segment.start, 2),
-            "end": round(segment.end, 2),
-            "text": segment.text,
-            "source": segment.source,
-        }
-        for segment in segments[-8:]
-    ]
     action_rows = [
         {
             "time": round(action.timestamp, 2),
             "action": action.action_type,
             "title": action.display_payload.get("title", action.action_type),
             "skus": " + ".join(action.skus),
-            "confidence": action.confidence,
         }
-        for action in actions[-8:]
+        for action in actions[-6:]
     ]
-    metrics = {
-        "Chunk": f"{chunk_index + 1}/{max_chunks_label}",
-        "Captions": len(segments),
-        "Actions": len(actions),
-        "Queue": queue_status.get("queueDepth"),
-        "Dropped": queue_status.get("droppedChunks") or 0,
-        "Max RMS": audio_stats.get("maxRms"),
-        "Mean RMS": audio_stats.get("meanRms"),
-        "Speech": audio_stats.get("speechDetected"),
-    }
-    if chunk_path is not None:
-        metrics["Chunk file"] = chunk_path.name
-    display_stream_state_panel(
-        title="Live Mic ASR + Commerce Actions",
-        state_label=state_label,
-        metrics=metrics,
-        captions=caption_rows,
-        actions=action_rows,
-        detail=detail,
-        accent="#a33b2f" if "Skip" not in state_label else "#b45309",
-        display_key=display_key or "live_mic_stream_panel",
+    _publish_colab_mic_debug(
+        {
+            "chunkIndex": chunk_index + 1,
+            "maxChunks": max_chunks_label,
+            "state": state_label.lower().replace(" ", "_"),
+            "status": "live_result_update",
+            "latestCaption": segments[-1].text if segments else "",
+            "captionCount": len(segments),
+            "actionCount": len(actions),
+            "actionRows": action_rows,
+            "queueDepth": queue_status.get("queueDepth"),
+            "droppedChunks": queue_status.get("droppedChunks"),
+        }
     )

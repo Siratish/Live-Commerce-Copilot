@@ -120,9 +120,22 @@ class FullDemoPlaybackGate:
         self._duration = max((window.end for window in self.windows), default=0.0)
         self._state = "ready"
         self._detail = "press_start"
+        self._latest_caption = "Waiting for live transcript..."
+        self._caption_count = 0
+        self._action_rows: List[Dict[str, Any]] = []
         self._ticker_started = False
+        self.caption_id = f"{self.widget_id}-caption"
         self.status_html = widgets.HTML()
         self.detail_html = widgets.HTML()
+        self.video_html = widgets.HTML(self._video_html(), layout=widgets.Layout(width="100%"))
+        self.progress_html = widgets.HTML(
+            self._progress_html(),
+            layout=widgets.Layout(width="100%"),
+        )
+        self.actions_html = widgets.HTML(
+            self._action_rail_html(),
+            layout=widgets.Layout(width="100%"),
+        )
         self.toggle_button = widgets.Button(
             description="",
             icon="play",
@@ -134,13 +147,34 @@ class FullDemoPlaybackGate:
         self.toggle_button.on_click(lambda _button: self.toggle())
         self.ui = widgets.VBox(
             [
-                widgets.HTML(self._showcase_html()),
                 widgets.HBox(
-                    [self.toggle_button],
-                    layout=widgets.Layout(gap="8px", margin="10px 0 0 0"),
+                    [
+                        widgets.VBox(
+                            [
+                                self.video_html,
+                                widgets.HBox(
+                                    [self.toggle_button, self.progress_html],
+                                    layout=widgets.Layout(
+                                        align_items="center",
+                                        gap="10px",
+                                        width="100%",
+                                        margin="10px 0 0 0",
+                                    ),
+                                ),
+                            ],
+                            layout=widgets.Layout(width="62%"),
+                        ),
+                        widgets.VBox(
+                            [self.actions_html],
+                            layout=widgets.Layout(width="38%"),
+                        ),
+                    ],
+                    layout=widgets.Layout(
+                        align_items="flex-start",
+                        gap="14px",
+                        width="100%",
+                    ),
                 ),
-                self.status_html,
-                self.detail_html,
             ],
             layout=widgets.Layout(width="100%"),
         )
@@ -250,14 +284,24 @@ class FullDemoPlaybackGate:
                 f"{float(payload['chunkStart']):.2f}-{float(payload['chunkEnd']):.2f}s"
             )
         if payload.get("captionCount") is not None:
+            self._caption_count = int(payload.get("captionCount") or 0)
             detail_parts.append(f"{payload['captionCount']} captions")
         if payload.get("actionCount") is not None:
             detail_parts.append(f"{payload['actionCount']} actions")
+        if payload.get("latestCaption"):
+            self._latest_caption = str(payload["latestCaption"])
+        if payload.get("actionRows") is not None:
+            self._action_rows = list(payload.get("actionRows") or [])
         self._detail = " | ".join(detail_parts)
         self._render_status()
 
     def _render_status(self) -> None:
         status = self.status()
+        self.progress_html.value = self._progress_html(status["currentTime"])
+        self.actions_html.value = self._action_rail_html()
+        self._eval_caption_js(self._latest_caption)
+        self._render_toggle()
+        return
         self.status_html.value = (
             '<div class="lc-selected-summary">'
             f"<strong>{html.escape(self._state)}</strong> · "
@@ -301,10 +345,9 @@ class FullDemoPlaybackGate:
 
         threading.Thread(target=tick, daemon=True).start()
 
-    def _showcase_html(self) -> str:
+    def _video_html(self) -> str:
         return f"""
-<div class="lc-viewer">
-  <div class="lc-video">
+<div class="lc-video">
     <audio id="{self.widget_id}" preload="metadata" src="{_audio_data_uri(self.audio_path)}" style="display:none;"></audio>
     <div class="lc-video-art">
       <div class="lc-video-badge">Live</div>
@@ -312,21 +355,45 @@ class FullDemoPlaybackGate:
         <div class="lc-host-head"></div>
         <div class="lc-host-body"></div>
       </div>
-      <div class="lc-video-caption">Press Start to stream audio into ASR.</div>
+      <div class="lc-video-caption" id="{self.caption_id}">{html.escape(self._latest_caption)}</div>
     </div>
-  </div>
-  <div class="lc-action-rail">
-    <div class="lc-panel-title">Live Audio Stream</div>
-    <div class="lc-stats">
-      <span>{html.escape(self.source_label)}</span>
-      <span>{len(self.windows)} chunks</span>
-    </div>
-    <div class="lc-source-detail">
-      This uses the same real-time chunk runner as the standalone demo.
-    </div>
-  </div>
 </div>
 """
+
+    def _progress_html(self, current_time: float = 0.0) -> str:
+        percent = 0.0
+        if self._duration:
+            percent = max(0.0, min(100.0, (float(current_time) / self._duration) * 100.0))
+        return f'<div class="lc-progress-bar lc-inline-progress"><div style="width:{percent:.2f}%"></div></div>'
+
+    def _action_rail_html(self) -> str:
+        return (
+            '<div class="lc-action-rail">'
+            '<div class="lc-panel-title">Live ASR + action preview</div>'
+            '<div class="lc-stats">'
+            f"<span>{self._caption_count} captions</span>"
+            f"<span>{len(self._action_rows)} actions</span>"
+            "</div>"
+            f'<div class="lc-live-actions">{_live_action_cards_html(self._action_rows)}</div>'
+            "</div>"
+        )
+
+    def _eval_caption_js(self, text: str) -> None:
+        script = (
+            f"const caption = document.getElementById({json.dumps(self.caption_id)});"
+            f"if (caption) {{ caption.textContent = {json.dumps(text)}; }}"
+        )
+        try:
+            from google.colab import output  # type: ignore
+
+            output.eval_js(script)
+        except Exception:
+            try:
+                from IPython.display import Javascript, display  # type: ignore
+
+                display(Javascript(script))
+            except Exception:
+                pass
 
     def _eval_audio_js(self, action: str) -> None:
         script = (
@@ -355,8 +422,22 @@ class FullDemoMicGate:
         self._ready = False
         self._recording = False
         self._stopped = False
+        self.widget_id = f"full-demo-mic-{uuid.uuid4().hex}"
+        self.caption_id = f"{self.widget_id}-caption"
+        self._latest_caption = "Waiting for live transcript..."
+        self._caption_count = 0
+        self._action_rows: List[Dict[str, Any]] = []
         self.status_html = widgets.HTML()
         self.detail_html = widgets.HTML()
+        self.video_html = widgets.HTML(self._video_html(), layout=widgets.Layout(width="100%"))
+        self.progress_html = widgets.HTML(
+            self._progress_html(),
+            layout=widgets.Layout(width="100%"),
+        )
+        self.actions_html = widgets.HTML(
+            self._action_rail_html(),
+            layout=widgets.Layout(width="100%"),
+        )
         self.toggle_button = widgets.Button(
             description="",
             icon="microphone",
@@ -368,13 +449,34 @@ class FullDemoMicGate:
         self.toggle_button.on_click(lambda _button: self.toggle())
         self.ui = widgets.VBox(
             [
-                widgets.HTML(self._showcase_html()),
                 widgets.HBox(
-                    [self.toggle_button],
-                    layout=widgets.Layout(gap="8px", margin="10px 0 0 0"),
+                    [
+                        widgets.VBox(
+                            [
+                                self.video_html,
+                                widgets.HBox(
+                                    [self.toggle_button, self.progress_html],
+                                    layout=widgets.Layout(
+                                        align_items="center",
+                                        gap="10px",
+                                        width="100%",
+                                        margin="10px 0 0 0",
+                                    ),
+                                ),
+                            ],
+                            layout=widgets.Layout(width="62%"),
+                        ),
+                        widgets.VBox(
+                            [self.actions_html],
+                            layout=widgets.Layout(width="38%"),
+                        ),
+                    ],
+                    layout=widgets.Layout(
+                        align_items="flex-start",
+                        gap="14px",
+                        width="100%",
+                    ),
                 ),
-                self.status_html,
-                self.detail_html,
             ],
             layout=widgets.Layout(width="100%"),
         )
@@ -404,15 +506,30 @@ class FullDemoMicGate:
             self._ready = True
         elif state in {"loading_asr", "stopped"}:
             self._ready = False
-        self.status_html.value = (
-            '<div class="lc-selected-summary">'
-            f"<strong>{html.escape(state)}</strong>"
-            "</div>"
-        )
-        self.detail_html.value = (
-            '<div class="lc-source-detail">' + html.escape(detail) + "</div>"
-        )
+        self._eval_caption_js(self._latest_caption)
+        self.actions_html.value = self._action_rail_html()
         self._render_toggle()
+
+    def update_results(
+        self,
+        segments: Sequence[Any],
+        actions: Sequence[Any],
+        _metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        if segments:
+            self._latest_caption = str(segments[-1].text)
+        self._caption_count = len(segments)
+        self._action_rows = [
+            {
+                "time": round(action.timestamp, 2),
+                "action": action.action_type,
+                "title": action.display_payload.get("title", action.action_type),
+                "skus": " + ".join(action.skus),
+            }
+            for action in actions[-6:]
+        ]
+        self.actions_html.value = self._action_rail_html()
+        self._eval_caption_js(self._latest_caption)
 
     def _render_toggle(self) -> None:
         if self._recording:
@@ -422,32 +539,54 @@ class FullDemoMicGate:
             self.toggle_button.icon = "microphone"
             self.toggle_button.tooltip = "Enable mic input"
         self.toggle_button.disabled = self._stopped or not self._ready
+        self.progress_html.value = self._progress_html()
 
-    def _showcase_html(self) -> str:
+    def _video_html(self) -> str:
         return """
-<div class="lc-viewer">
-  <div class="lc-video">
+<div class="lc-video">
     <div class="lc-video-art">
       <div class="lc-video-badge">Live mic</div>
       <div class="lc-host-frame">
         <div class="lc-host-head"></div>
         <div class="lc-host-body"></div>
       </div>
-      <div class="lc-video-caption">Press Start to stream microphone chunks into ASR.</div>
+      <div class="lc-video-caption" id="{caption_id}">Waiting for live transcript...</div>
     </div>
-  </div>
-  <div class="lc-action-rail">
-    <div class="lc-panel-title">Live Microphone Stream</div>
-    <div class="lc-stats">
-      <span>Browser mic</span>
-      <span>Pause-aware chunks</span>
-    </div>
-    <div class="lc-source-detail">
-      Stop closes input; queued chunks still finish ASR and commerce actions.
-    </div>
-  </div>
 </div>
-"""
+""".format(caption_id=html.escape(self.caption_id))
+
+    def _progress_html(self) -> str:
+        width = "100%" if self._recording else "0%"
+        return f'<div class="lc-progress-bar lc-inline-progress"><div style="width:{width}"></div></div>'
+
+    def _action_rail_html(self) -> str:
+        return (
+            '<div class="lc-action-rail">'
+            '<div class="lc-panel-title">Live ASR + action preview</div>'
+            '<div class="lc-stats">'
+            f"<span>{self._caption_count} captions</span>"
+            f"<span>{len(self._action_rows)} actions</span>"
+            "</div>"
+            f'<div class="lc-live-actions">{_live_action_cards_html(self._action_rows)}</div>'
+            "</div>"
+        )
+
+    def _eval_caption_js(self, text: str) -> None:
+        script = (
+            f"const caption = document.getElementById({json.dumps(self.caption_id)});"
+            f"if (caption) {{ caption.textContent = {json.dumps(text)}; }}"
+        )
+        try:
+            from google.colab import output  # type: ignore
+
+            output.eval_js(script)
+        except Exception:
+            try:
+                from IPython.display import Javascript, display  # type: ignore
+
+                display(Javascript(script))
+            except Exception:
+                pass
 
 
 def display_full_demo_ui(repo_root: Path = REPO_ROOT) -> None:
@@ -999,6 +1138,7 @@ def display_full_demo_ui(repo_root: Path = REPO_ROOT) -> None:
                     config,
                     chunk_source=mic_source,
                     asr=asr_engine,
+                    result_sink=mic_gate.update_results if mic_source is not None else None,
                     cancel_event=cancel_event,
                 )
                 if int(state.get("run_id") or 0) == run_id:
@@ -1418,6 +1558,33 @@ def build_live_ready_scene_html(
   </div>
 </div>
 """
+
+
+def _live_action_cards_html(action_rows: Sequence[Dict[str, Any]]) -> str:
+    if not action_rows:
+        return '<div class="lc-action-card"><div class="lc-muted">No actions emitted yet.</div></div>'
+    cards = []
+    for action in action_rows[-6:]:
+        action_type = html.escape(str(action.get("action") or "ACTION"))
+        title = html.escape(str(action.get("title") or _human_action_title(action_type)))
+        skus = html.escape(str(action.get("skus") or "-"))
+        timestamp = html.escape(str(action.get("time") or "0.00"))
+        cards.append(
+            '<div class="lc-action-card">'
+            f'<div class="lc-action-type">{action_type}</div>'
+            f"<strong>{title}</strong>"
+            f"<div>{skus}</div>"
+            f"<small>{timestamp}s</small>"
+            "</div>"
+        )
+    return "".join(cards)
+
+
+def _human_action_title(action_type: str) -> str:
+    return " ".join(
+        word.upper() if word in {"asr", "sku"} else word.capitalize()
+        for word in str(action_type).lower().replace("_", " ").split()
+    )
 
 
 def build_processing_scene_html(title: str, detail: str) -> str:
@@ -1879,6 +2046,7 @@ def _style_block() -> str:
 .lc-no-audio{border:1px solid #d0d5dd;border-radius:8px;padding:10px;margin-top:10px;color:#667085;background:#f9fafb}
 .lc-progress-bar{height:10px;border-radius:999px;overflow:hidden;background:#f2f4f7;margin-top:10px}
 .lc-progress-bar div{height:100%;width:0%;background:#b42318}
+.lc-inline-progress{width:100%;margin-top:0}
 .lc-processing-panel .lc-progress-bar div{width:42%;animation:lc-progress-sweep 1.15s ease-in-out infinite}
 @keyframes lc-progress-sweep{0%{transform:translateX(-120%)}100%{transform:translateX(260%)}}
 .lc-action-rail{min-height:390px;color:#111827}
