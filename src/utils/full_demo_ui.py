@@ -421,6 +421,7 @@ class FullDemoMicGate:
         self.chunk_source = chunk_source
         self._ready = False
         self._recording = False
+        self._started_once = False
         self._stopped = False
         self.widget_id = f"full-demo-mic-{uuid.uuid4().hex}"
         self.caption_id = f"{self.widget_id}-caption"
@@ -484,7 +485,7 @@ class FullDemoMicGate:
 
     def toggle(self) -> None:
         if self._recording:
-            self.stop()
+            self.pause()
         else:
             self.start()
 
@@ -492,8 +493,20 @@ class FullDemoMicGate:
         if not self._ready or self._stopped or self._recording:
             return
         self._recording = True
-        self.publish("recording", "Browser mic is starting. Speak after permission is granted.")
-        self.chunk_source.start()
+        if self._started_once:
+            self.publish("recording", "Browser mic input resumed.")
+            self.chunk_source.resume()
+        else:
+            self._started_once = True
+            self.publish("recording", "Browser mic is starting. Speak after permission is granted.")
+            self.chunk_source.start()
+
+    def pause(self) -> None:
+        if not self._recording or self._stopped:
+            return
+        self._recording = False
+        self.chunk_source.pause()
+        self.publish("paused", "Mic input is paused. Queued chunks may still finish processing.")
 
     def stop(self) -> None:
         self._recording = False
@@ -533,11 +546,11 @@ class FullDemoMicGate:
 
     def _render_toggle(self) -> None:
         if self._recording:
-            self.toggle_button.icon = "microphone-slash"
-            self.toggle_button.tooltip = "Disable mic input"
+            self.toggle_button.icon = "pause"
+            self.toggle_button.tooltip = "Pause mic input"
         else:
             self.toggle_button.icon = "microphone"
-            self.toggle_button.tooltip = "Enable mic input"
+            self.toggle_button.tooltip = "Enable or resume mic input"
         self.toggle_button.disabled = self._stopped or not self._ready
         self.progress_html.value = self._progress_html()
 
@@ -793,7 +806,7 @@ def display_full_demo_ui(repo_root: Path = REPO_ROOT) -> None:
                     '<div class="lc-source-detail">'
                     '<strong>Microphone source</strong><br>'
                     "Recording mode opens a confirm/cancel recorder in the showcase. "
-                    "Live mode opens start/stop stream controls there."
+                    "Live mode opens start/pause stream controls there."
                     "</div>"
                 )
             ]
@@ -1029,7 +1042,7 @@ def display_full_demo_ui(repo_root: Path = REPO_ROOT) -> None:
             output.clear_output(wait=True)
             print(
                 f"Live stream panel is starting for {selected_source_label()}. "
-                "Use Start/Stop inside the showcase."
+                "Use Start/Pause inside the showcase."
             )
         with viewer:
             viewer.clear_output(wait=True)
@@ -1107,7 +1120,7 @@ def display_full_demo_ui(repo_root: Path = REPO_ROOT) -> None:
 
         with output:
             output.clear_output(wait=True)
-            print("Live mic panel is starting. Use Start/Stop inside the showcase.")
+            print("Live mic panel is starting. Use Start/Pause inside the showcase.")
         with viewer:
             viewer.clear_output(wait=True)
             try:
@@ -1521,7 +1534,7 @@ def build_live_ready_scene_html(
     source_note = (
         "Microphone input will stream into a queue. Stop closes the mic while queued chunks finish."
         if is_mic
-        else "Audio will be released to ASR by stream time. Stop closes new input while queued chunks finish."
+        else "Audio will be released to ASR by stream time. Pause holds new chunks until the stream resumes."
     )
     audio_note = (
         "Browser mic source"

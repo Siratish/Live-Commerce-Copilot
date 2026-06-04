@@ -118,6 +118,23 @@ class BrowserMicChunkSource:
         except Exception as exc:
             self._handle_error({"error": str(exc)})
 
+    def pause(self) -> None:
+        try:
+            from google.colab import output  # type: ignore
+
+            output.eval_js("window.liveCommerceMic && window.liveCommerceMic.pause()")
+        except Exception:
+            pass
+
+    def resume(self) -> None:
+        self._handle_start()
+        try:
+            from google.colab import output  # type: ignore
+
+            output.eval_js("window.liveCommerceMic && window.liveCommerceMic.resume()")
+        except Exception as exc:
+            self._handle_error({"error": str(exc)})
+
     def _handle_start(self, *_args: Any) -> Dict[str, Any]:
         self._started.set()
         return {"started": True}
@@ -742,6 +759,7 @@ def _install_colab_mic_recorder() -> None:
                       recorder.stop();
                     }
                   };
+                  state.activeStopRecorder = stopRecorder;
                   const monitorPause = () => {
                     const now = performance.now();
                     state.analyser.getByteTimeDomainData(waveform);
@@ -795,6 +813,7 @@ def _install_colab_mic_recorder() -> None:
                     const blob = new Blob(chunks, {type: mimeType});
                     if (state.activeRecorder === recorder) {
                       state.activeRecorder = null;
+                      state.activeStopRecorder = null;
                     }
                     state.publishDebug({
                       chunkIndex: chunkIndex || null,
@@ -852,10 +871,12 @@ def _install_colab_mic_recorder() -> None:
                     queueDepth: (state.bufferQueue || []).length
                   };
                 }
-                state.stopRequested = Boolean(state.stopRequested);
+                state.stopRequested = false;
+                state.pauseRequested = false;
                 state.startRequested = Boolean(state.startRequested);
                 state.bufferQueue = [];
                 state.bufferWaiters = [];
+                state.resumeWaiters = [];
                 state.bufferDone = false;
                 state.bufferError = null;
                 state.droppedChunks = 0;
@@ -864,6 +885,19 @@ def _install_colab_mic_recorder() -> None:
                   if (state.startRequested) return Promise.resolve(true);
                   return new Promise(resolve => {
                     state.resolveStart = resolve;
+                  });
+                };
+                state.waitForResume = function() {
+                  if (!state.pauseRequested || state.stopRequested) return Promise.resolve(true);
+                  state.publishDebug({
+                    state: 'paused',
+                    status: 'input_paused',
+                    queueDepth: (state.bufferQueue || []).length,
+                    droppedChunks: state.droppedChunks || 0
+                  });
+                  return new Promise(resolve => {
+                    state.resumeWaiters = state.resumeWaiters || [];
+                    state.resumeWaiters.push(resolve);
                   });
                 };
                 state.publishDebug({
@@ -927,6 +961,8 @@ def _install_colab_mic_recorder() -> None:
                     const unlimited = !numericMaxChunks || numericMaxChunks < 1;
                     for (let index = 1; unlimited || index <= numericMaxChunks; index += 1) {
                       if (state.stopRequested) break;
+                      await state.waitForResume();
+                      if (state.stopRequested) break;
                       const payload = await state.recordChunk(
                         maxMilliseconds,
                         minMilliseconds,
@@ -945,6 +981,17 @@ def _install_colab_mic_recorder() -> None:
                         queueDepth: state.bufferQueue.length,
                         droppedChunks: state.droppedChunks
                       });
+                      if (payload.stopReason === 'pause_requested') {
+                        state.pauseRequested = true;
+                        state.publishDebug({
+                          chunkIndex: index,
+                          state: 'paused',
+                          status: 'input_paused',
+                          queueDepth: state.bufferQueue.length,
+                          droppedChunks: state.droppedChunks
+                        });
+                        await state.waitForResume();
+                      }
                     }
                   } catch (error) {
                     state.bufferError = error && (error.message || String(error));
@@ -1003,21 +1050,69 @@ def _install_colab_mic_recorder() -> None:
                 return {
                   active: Boolean(state.bufferLoopActive),
                   done: Boolean(state.bufferDone),
+                  paused: Boolean(state.pauseRequested),
                   queueDepth: (state.bufferQueue || []).length,
                   droppedChunks: state.droppedChunks || 0,
                   error: state.bufferError || null
                 };
               };
+              window.liveCommerceMic.pause = function() {
+                const state = window.liveCommerceMic;
+                state.pauseRequested = true;
+                if (typeof state.activeStopRecorder === 'function') {
+                  state.activeStopRecorder('pause_requested');
+                } else if (state.activeRecorder && state.activeRecorder.state !== 'inactive') {
+                  state.activeRecorder.stop();
+                }
+                state.publishDebug({
+                  state: 'paused',
+                  status: 'input_paused',
+                  queueDepth: (state.bufferQueue || []).length,
+                  droppedChunks: state.droppedChunks || 0
+                });
+                return true;
+              };
+              window.liveCommerceMic.resume = function() {
+                const state = window.liveCommerceMic;
+                state.startRequested = true;
+                state.stopRequested = false;
+                state.pauseRequested = false;
+                if (typeof state.resolveStart === 'function') {
+                  state.resolveStart(true);
+                  state.resolveStart = null;
+                }
+                while ((state.resumeWaiters || []).length) {
+                  state.resumeWaiters.shift()(true);
+                }
+                if (state.audioContext && state.audioContext.state === 'suspended') {
+                  state.audioContext.resume();
+                }
+                state.publishDebug({
+                  state: state.bufferLoopActive ? 'buffering' : 'ready',
+                  status: 'input_resumed',
+                  queueDepth: (state.bufferQueue || []).length,
+                  droppedChunks: state.droppedChunks || 0
+                });
+                return true;
+              };
               window.liveCommerceMic.stop = function() {
                 const state = window.liveCommerceMic;
                 state.stopRequested = true;
+                state.pauseRequested = false;
                 state.bufferDone = true;
                 if (typeof state.resolveStart === 'function') {
                   state.resolveStart(false);
                   state.resolveStart = null;
                 }
+                while ((state.resumeWaiters || []).length) {
+                  state.resumeWaiters.shift()(false);
+                }
                 if (state.activeRecorder && state.activeRecorder.state !== 'inactive') {
-                  state.activeRecorder.stop();
+                  if (typeof state.activeStopRecorder === 'function') {
+                    state.activeStopRecorder('input_closed');
+                  } else {
+                    state.activeRecorder.stop();
+                  }
                 }
                 if (state.stream) {
                   state.stream.getTracks().forEach(track => track.stop());
@@ -1243,12 +1338,13 @@ def install_colab_live_mic_debug_panel(
                     || debugState === 'buffering'
                     || debugState === 'queued'
                     || debugState === 'transcribing'
-                    || (state.startRequested && !state.stopRequested && debugState !== 'ready');
+                    || (state.startRequested && !state.stopRequested && !state.pauseRequested && debugState !== 'ready' && debugState !== 'paused');
+                  const paused = Boolean(state.pauseRequested) || debugState === 'paused';
                   const stopped = state.stopRequested || debugState === 'stopped';
-                  const ready = debugState === 'ready';
+                  const ready = debugState === 'ready' || paused;
                   if (!startButton) return;
                   startButton.innerHTML = active ? '&#10073;&#10073;' : '&#127908;';
-                  startButton.title = active ? 'Disable mic input' : 'Enable mic input';
+                  startButton.title = active ? 'Pause mic input' : 'Enable mic input';
                   startButton.setAttribute('aria-label', startButton.title);
                   startButton.disabled = stopped || (!ready && !active);
                 };
@@ -1261,14 +1357,28 @@ def install_colab_live_mic_debug_panel(
                       || debugState === 'buffering'
                       || debugState === 'queued'
                       || debugState === 'transcribing'
-                      || (state.startRequested && !state.stopRequested && debugState !== 'ready');
+                      || (state.startRequested && !state.stopRequested && !state.pauseRequested && debugState !== 'ready' && debugState !== 'paused');
                     if (active) {
-                      if (typeof state.stop === 'function') state.stop();
-                      if (typeof state.emitCallback === 'function') {
-                        state.emitCallback(callbackNames.stop, {stopped: true});
+                      if (typeof state.pause === 'function') state.pause();
+                      else {
+                        state.pauseRequested = true;
+                        state.publishDebug({state: 'paused', status: 'input_paused'});
                       }
-                      state.stopRequested = true;
-                      state.publishDebug({state: 'stopped', status: 'input_closed'});
+                      setMicButton();
+                      return;
+                    }
+                    if (state.pauseRequested || debugState === 'paused') {
+                      if (typeof state.resume === 'function') state.resume();
+                      else {
+                        state.startRequested = true;
+                        state.stopRequested = false;
+                        state.pauseRequested = false;
+                        if (typeof state.resolveStart === 'function') {
+                          state.resolveStart(true);
+                          state.resolveStart = null;
+                        }
+                        state.publishDebug({state: 'buffering', status: 'input_resumed'});
+                      }
                       setMicButton();
                       return;
                     }
@@ -1278,6 +1388,7 @@ def install_colab_live_mic_debug_panel(
                     }
                     state.startRequested = true;
                     state.stopRequested = false;
+                    state.pauseRequested = false;
                     if (callbackConfig && typeof state.emitCallback === 'function') {
                       state.emitCallback(callbackNames.start, {started: true});
                     }
