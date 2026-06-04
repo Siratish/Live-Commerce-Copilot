@@ -197,7 +197,7 @@ def generate_commerce_actions(
                         display_payload={
                             "title": "Recommended bundle",
                             "products": [_product_payload(first), _product_payload(second)],
-                            "reason": "Model-assisted transcript decision matched compatible catalog products.",
+                            "reason": "Transcript cues matched compatible catalog products.",
                         },
                     )
                 )

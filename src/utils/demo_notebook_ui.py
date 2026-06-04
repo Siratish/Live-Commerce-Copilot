@@ -31,34 +31,34 @@ from src.utils.realtime_audio_file import (
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_CATALOG = REPO_ROOT / "data" / "demo" / "product_catalog.csv"
-DEFAULT_PROMOTIONS = REPO_ROOT / "data" / "demo" / "promotions.csv"
+DEFAULT_CATALOG = REPO_ROOT / "data" / "demo" / "catalog" / "product_catalog.csv"
+DEFAULT_PROMOTIONS = REPO_ROOT / "data" / "demo" / "catalog" / "promotions.csv"
 SAMPLE_AUDIO = {
     "Audio 1 - Beauty": REPO_ROOT / "data" / "demo" / "audio" / "1.mp3",
     "Audio 2 - Tech": REPO_ROOT / "data" / "demo" / "audio" / "2.mp3",
 }
 SAMPLE_CACHED_TRANSCRIPTS = {
-    "Audio 1 - Beauty": REPO_ROOT / "data" / "demo" / "audio_1_captions.json",
-    "Audio 2 - Tech": REPO_ROOT / "data" / "demo" / "audio_2_captions.json",
+    "Audio 1 - Beauty": REPO_ROOT / "data" / "demo" / "captions" / "audio_1_captions.json",
+    "Audio 2 - Tech": REPO_ROOT / "data" / "demo" / "captions" / "audio_2_captions.json",
 }
 SAMPLE_CACHED_ACTIONS = {
-    "Audio 1 - Beauty": REPO_ROOT / "data" / "demo" / "audio_1_actions.json",
-    "Audio 2 - Tech": REPO_ROOT / "data" / "demo" / "audio_2_actions.json",
+    "Audio 1 - Beauty": REPO_ROOT / "data" / "demo" / "actions" / "audio_1_actions.json",
+    "Audio 2 - Tech": REPO_ROOT / "data" / "demo" / "actions" / "audio_2_actions.json",
 }
-FULL_DEMO_ASR_PROVIDER = "openai_whisper"
-FULL_DEMO_ASR_MODEL = "turbo"
-FULL_DEMO_LANGUAGE = "th"
-FULL_DEMO_CHUNK_SECONDS = 15.0
-FULL_DEMO_MIN_CHUNK_SECONDS = 1.0
-FULL_DEMO_PAUSE_SECONDS = 0.3
-FULL_DEMO_SILENCE_THRESHOLD = 0.015
-FULL_DEMO_DYNAMIC_CHUNKING = True
+DEMO_ASR_PROVIDER = "openai_whisper"
+DEMO_ASR_MODEL = "turbo"
+DEMO_LANGUAGE = "th"
+DEMO_CHUNK_SECONDS = 15.0
+DEMO_MIN_CHUNK_SECONDS = 1.0
+DEMO_PAUSE_SECONDS = 0.3
+DEMO_SILENCE_THRESHOLD = 0.015
+DEMO_DYNAMIC_CHUNKING = True
 
 
-class FullDemoSession:
+class DemoNotebookSession:
     def __init__(self, repo_root: Path = REPO_ROOT):
         self.repo_root = repo_root
-        self.output_dir = repo_root / "outputs" / "full_demo"
+        self.output_dir = repo_root / "outputs" / "recording_mode_demo"
         self.upload_dir = self.output_dir / "uploads"
         self.product_image_dir = self.output_dir / "product_images"
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -96,25 +96,25 @@ class FullDemoSession:
         self.save_catalog_files()
 
 
-_FULL_DEMO_SESSIONS: Dict[Path, FullDemoSession] = {}
+_DEMO_NOTEBOOK_SESSIONS: Dict[Path, DemoNotebookSession] = {}
 
 
-def _get_full_demo_session(repo_root: Path = REPO_ROOT) -> FullDemoSession:
+def _get_demo_notebook_session(repo_root: Path = REPO_ROOT) -> DemoNotebookSession:
     resolved = Path(repo_root).resolve()
-    if resolved not in _FULL_DEMO_SESSIONS:
-        _FULL_DEMO_SESSIONS[resolved] = FullDemoSession(resolved)
-    return _FULL_DEMO_SESSIONS[resolved]
+    if resolved not in _DEMO_NOTEBOOK_SESSIONS:
+        _DEMO_NOTEBOOK_SESSIONS[resolved] = DemoNotebookSession(resolved)
+    return _DEMO_NOTEBOOK_SESSIONS[resolved]
 
 
-def display_full_demo_ui(repo_root: Path = REPO_ROOT) -> None:
-    """Display the simplified full notebook demo UI."""
+def display_recording_mode_demo_ui(repo_root: Path = REPO_ROOT) -> None:
+    """Display the simplified recording-mode notebook demo UI."""
     try:
         import ipywidgets as widgets  # type: ignore
         from IPython.display import HTML, display  # type: ignore
     except ImportError:
         return
 
-    session = _get_full_demo_session(repo_root)
+    session = _get_demo_notebook_session(repo_root)
     state: Dict[str, Any] = {"running": False, "source": None}
     display(HTML(_style_block()))
 
@@ -155,7 +155,7 @@ def display_full_demo_ui(repo_root: Path = REPO_ROOT) -> None:
 
     controls = widgets.VBox(
         [
-            widgets.HTML('<div class="lc-panel-title">Full demo</div>'),
+            widgets.HTML('<div class="lc-panel-title">Recording mode demo</div>'),
             source_picker,
             status_html,
         ],
@@ -188,7 +188,7 @@ def display_full_demo_ui(repo_root: Path = REPO_ROOT) -> None:
     def render_idle() -> None:
         with viewer:
             viewer.clear_output(wait=True)
-            display(HTML(_full_demo_empty_state_html()))
+            display(HTML(_recording_mode_empty_state_html()))
 
     def process_audio(audio_path: Path, source_key: str, source_label: str) -> None:
         if state.get("running"):
@@ -197,19 +197,19 @@ def display_full_demo_ui(repo_root: Path = REPO_ROOT) -> None:
         clear_status()
         with viewer:
             viewer.clear_output(wait=True)
-            display(HTML(build_processing_scene_html("Processing full demo", source_label)))
+            display(HTML(build_processing_scene_html("Processing recording mode demo", source_label)))
         try:
             summary, captions, actions = run_recording_pipeline(
                 session=session,
                 audio_path=audio_path,
                 source_key=source_key,
-                asr_provider=FULL_DEMO_ASR_PROVIDER,
-                asr_model=FULL_DEMO_ASR_MODEL,
+                asr_provider=DEMO_ASR_PROVIDER,
+                asr_model=DEMO_ASR_MODEL,
                 use_cached=False,
-                dynamic_chunking=FULL_DEMO_DYNAMIC_CHUNKING,
-                chunk_seconds=FULL_DEMO_CHUNK_SECONDS,
-                pause_seconds=FULL_DEMO_PAUSE_SECONDS,
-                silence_threshold=FULL_DEMO_SILENCE_THRESHOLD,
+                dynamic_chunking=DEMO_DYNAMIC_CHUNKING,
+                chunk_seconds=DEMO_CHUNK_SECONDS,
+                pause_seconds=DEMO_PAUSE_SECONDS,
+                silence_threshold=DEMO_SILENCE_THRESHOLD,
             )
             state["last_summary"] = summary
             with viewer:
@@ -220,7 +220,7 @@ def display_full_demo_ui(repo_root: Path = REPO_ROOT) -> None:
                             audio_path=audio_path,
                             captions=captions,
                             actions=actions,
-                            mode_label="Full demo",
+                            mode_label="Recording mode",
                             title="Action history",
                             show_audio_controls=True,
                             catalog=session.catalog,
@@ -243,7 +243,7 @@ def display_full_demo_ui(repo_root: Path = REPO_ROOT) -> None:
                 viewer.clear_output(wait=True)
                 audio_path = record_colab_mic_clip(
                     session.upload_dir,
-                    max_seconds=FULL_DEMO_CHUNK_SECONDS,
+                    max_seconds=DEMO_CHUNK_SECONDS,
                 )
             set_busy(False)
             process_audio(audio_path, "mic", "Browser microphone input")
@@ -290,7 +290,7 @@ def display_catalog_manager_ui(repo_root: Path = REPO_ROOT) -> None:
     except ImportError:
         return
 
-    session = _get_full_demo_session(repo_root)
+    session = _get_demo_notebook_session(repo_root)
     state: Dict[str, str] = {"view": "products"}
     display(HTML(_style_block()))
 
@@ -506,19 +506,19 @@ def display_live_audio_file_demo_ui(repo_root: Path = REPO_ROOT) -> None:
         output_dir = repo_root / "outputs" / "live_mode" / "realtime_audio_file" / safe_label
         config = RealtimeAudioFileDemoConfig(
             audio_path=audio_path,
-            chunk_seconds=FULL_DEMO_CHUNK_SECONDS,
-            dynamic_chunking=FULL_DEMO_DYNAMIC_CHUNKING,
-            min_chunk_seconds=FULL_DEMO_MIN_CHUNK_SECONDS,
-            pause_seconds=FULL_DEMO_PAUSE_SECONDS,
-            silence_threshold=FULL_DEMO_SILENCE_THRESHOLD,
+            chunk_seconds=DEMO_CHUNK_SECONDS,
+            dynamic_chunking=DEMO_DYNAMIC_CHUNKING,
+            min_chunk_seconds=DEMO_MIN_CHUNK_SECONDS,
+            pause_seconds=DEMO_PAUSE_SECONDS,
+            silence_threshold=DEMO_SILENCE_THRESHOLD,
             max_chunks=None,
-            language=FULL_DEMO_LANGUAGE,
-            asr_provider=FULL_DEMO_ASR_PROVIDER,
-            asr_model=FULL_DEMO_ASR_MODEL,
+            language=DEMO_LANGUAGE,
+            asr_provider=DEMO_ASR_PROVIDER,
+            asr_model=DEMO_ASR_MODEL,
             install_asr_deps=False,
             output_dir=output_dir,
-            catalog_path=repo_root / "data" / "demo" / "product_catalog.csv",
-            promotions_path=repo_root / "data" / "demo" / "promotions.csv",
+            catalog_path=repo_root / "data" / "demo" / "catalog" / "product_catalog.csv",
+            promotions_path=repo_root / "data" / "demo" / "catalog" / "promotions.csv",
         )
         set_running(True)
         status.value = _status_card_html(
@@ -601,21 +601,21 @@ def display_live_mic_demo_ui(repo_root: Path = REPO_ROOT) -> None:
         )
     )
     config = LiveMicDemoConfig(
-        chunk_seconds=FULL_DEMO_CHUNK_SECONDS,
-        min_chunk_seconds=FULL_DEMO_MIN_CHUNK_SECONDS,
-        pause_seconds=FULL_DEMO_PAUSE_SECONDS,
-        silence_threshold=FULL_DEMO_SILENCE_THRESHOLD,
+        chunk_seconds=DEMO_CHUNK_SECONDS,
+        min_chunk_seconds=DEMO_MIN_CHUNK_SECONDS,
+        pause_seconds=DEMO_PAUSE_SECONDS,
+        silence_threshold=DEMO_SILENCE_THRESHOLD,
         max_chunks=None,
-        language=FULL_DEMO_LANGUAGE,
-        asr_provider=FULL_DEMO_ASR_PROVIDER,
-        asr_model=FULL_DEMO_ASR_MODEL,
+        language=DEMO_LANGUAGE,
+        asr_provider=DEMO_ASR_PROVIDER,
+        asr_model=DEMO_ASR_MODEL,
         install_asr_deps=False,
         show_debug_panel=True,
         continuous_recording=True,
         max_queue_chunks=16,
         output_dir=repo_root / "outputs" / "live_mode" / "live_mic",
-        catalog_path=repo_root / "data" / "demo" / "product_catalog.csv",
-        promotions_path=repo_root / "data" / "demo" / "promotions.csv",
+        catalog_path=repo_root / "data" / "demo" / "catalog" / "product_catalog.csv",
+        promotions_path=repo_root / "data" / "demo" / "catalog" / "promotions.csv",
     )
     summary = run_colab_live_mic_demo(config)
     display(
@@ -635,7 +635,7 @@ def display_live_mic_demo_ui(repo_root: Path = REPO_ROOT) -> None:
 
 
 def run_recording_pipeline(
-    session: FullDemoSession,
+    session: DemoNotebookSession,
     audio_path: Path,
     source_key: str,
     asr_provider: str,
@@ -668,10 +668,9 @@ def run_recording_pipeline(
             whisper_model=asr_model,
             asr_chunk_length_seconds=int(chunk_seconds),
             asr_dynamic_chunking=dynamic_chunking,
-            asr_min_chunk_seconds=FULL_DEMO_MIN_CHUNK_SECONDS,
+            asr_min_chunk_seconds=DEMO_MIN_CHUNK_SECONDS,
             asr_pause_seconds=pause_seconds,
             asr_silence_threshold=silence_threshold,
-            asr_max_new_tokens=256,
             allow_cached_fallback=False,
         )
         captions = CaptioningEngine(settings).transcribe()
@@ -763,9 +762,9 @@ def _status_card_html(kind: str, title: str, detail: str = "") -> str:
     )
 
 
-def _full_demo_empty_state_html() -> str:
+def _recording_mode_empty_state_html() -> str:
     return """
-<div class="lc-full-demo-empty">
+<div class="lc-recording-mode-empty">
   <div class="lc-empty-mark">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
       <path d="M4 7h16v10H4z"/>
@@ -1221,7 +1220,7 @@ def save_promotions_csv(promotions: Sequence[Promotion], path: Path) -> None:
 
 
 def default_asr_model(provider: str) -> str:
-    return "turbo" if provider in {"openai_whisper", "typhoon_whisper"} else "turbo"
+    return "turbo"
 
 
 def _audio_data_uri(audio_path: Path) -> str:
@@ -1416,7 +1415,7 @@ def _style_block() -> str:
 .lc-status-card{border:1px solid #d0d5dd;border-radius:8px;background:#fff;color:#111827;padding:10px;display:flex;flex-direction:column;gap:3px}
 .lc-status-card span{color:#667085;font-size:12px;line-height:1.35}
 .lc-status-error{border-color:#fecaca;background:#fef2f2;color:#7f1d1d}
-.lc-full-demo-empty{border:1px solid #d0d5dd;border-radius:8px;background:#fff;color:#111827;min-height:480px;display:flex;align-items:center;justify-content:center;gap:14px;padding:24px;box-shadow:0 8px 24px rgba(16,24,40,.06)}
+.lc-recording-mode-empty{border:1px solid #d0d5dd;border-radius:8px;background:#fff;color:#111827;min-height:480px;display:flex;align-items:center;justify-content:center;gap:14px;padding:24px;box-shadow:0 8px 24px rgba(16,24,40,.06)}
 .lc-empty-mark{width:64px;height:64px;border-radius:8px;background:#fff7ed;color:#b42318;border:1px solid #fed7aa;display:flex;align-items:center;justify-content:center}
 .lc-empty-mark svg{width:32px;height:32px}
 .lc-viewer{display:grid;grid-template-columns:minmax(0,1.25fr) minmax(260px,.75fr);gap:14px;border:1px solid #d0d5dd;border-radius:8px;padding:14px;background:#fff;margin-bottom:12px;box-shadow:0 8px 24px rgba(16,24,40,.06)}

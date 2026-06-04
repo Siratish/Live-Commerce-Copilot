@@ -7,11 +7,11 @@ import unittest
 
 from src.data.catalog import load_product_catalog, load_promotions
 from src.schemas import ProductCatalogItem, Promotion
-from src.utils.full_demo_ui import (
-    FULL_DEMO_CHUNK_SECONDS,
-    FULL_DEMO_DYNAMIC_CHUNKING,
-    FULL_DEMO_PAUSE_SECONDS,
-    FULL_DEMO_SILENCE_THRESHOLD,
+from src.utils.demo_notebook_ui import (
+    DEMO_CHUNK_SECONDS,
+    DEMO_DYNAMIC_CHUNKING,
+    DEMO_PAUSE_SECONDS,
+    DEMO_SILENCE_THRESHOLD,
     SAMPLE_AUDIO,
     build_processing_scene_html,
     build_catalog_scene_html,
@@ -21,7 +21,7 @@ from src.utils.full_demo_ui import (
 )
 
 
-class FullDemoUiTests(unittest.TestCase):
+class DemoNotebookUiTests(unittest.TestCase):
     def test_catalog_scene_html_includes_products_and_promotions(self) -> None:
         catalog = [
             ProductCatalogItem(
@@ -116,10 +116,10 @@ class FullDemoUiTests(unittest.TestCase):
                 asr_provider="openai_whisper",
                 asr_model="turbo",
                 use_cached=False,
-                dynamic_chunking=FULL_DEMO_DYNAMIC_CHUNKING,
-                chunk_seconds=FULL_DEMO_CHUNK_SECONDS,
-                pause_seconds=FULL_DEMO_PAUSE_SECONDS,
-                silence_threshold=FULL_DEMO_SILENCE_THRESHOLD,
+                dynamic_chunking=DEMO_DYNAMIC_CHUNKING,
+                chunk_seconds=DEMO_CHUNK_SECONDS,
+                pause_seconds=DEMO_PAUSE_SECONDS,
+                silence_threshold=DEMO_SILENCE_THRESHOLD,
             )
 
         self.assertEqual(summary["source_mode"], "recording_cache")

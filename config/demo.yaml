@@ -1,26 +1,17 @@
 captioning:
   mode: auto
   language: th
-  cached_transcript_path: data/demo/audio_1_captions.json
+  cached_transcript_path: data/demo/captions/audio_1_captions.json
   audio_path: data/demo/audio/1.mp3
   asr_provider: openai_whisper
   asr_model: large
   whisper_model: large
-  # To use Typhoon Whisper for Thai ASR, set:
-  # asr_provider: typhoon_whisper
-  # asr_model: turbo
-  # Typhoon aliases: large-v3, turbo, medium, monsoon-medium, isan-medium
-  # Typhoon ASR uses pause-aware utterance windows. This value is the max length
-  # before a long continuous utterance is split.
   asr_chunk_length_seconds: 4
   asr_dynamic_chunking: true
   asr_min_chunk_seconds: 1.0
   asr_pause_seconds: 0.7
   asr_silence_threshold: 0.012
   asr_frame_seconds: 0.1
-  asr_batch_size: 16
-  # Whisper decoder context is 448 tokens; keep room for language/task tokens.
-  asr_max_new_tokens: 440
   allow_cached_fallback: true
 
 outputs:

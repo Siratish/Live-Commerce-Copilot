@@ -17,8 +17,6 @@ from src.ai.captioning import (
     iter_pause_audio_windows_from_samples,
     load_cached_transcript,
     resolve_asr_model_id,
-    safe_whisper_max_new_tokens,
-    transcribe_audio_windows,
     write_caption_outputs,
 )
 from src.schemas import CaptionSegment, repair_caption_timestamps, validate_caption_segments
@@ -35,7 +33,7 @@ from src.utils.realtime_caption import build_realtime_caption_html
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-CACHED_TRANSCRIPT = REPO_ROOT / "data" / "demo" / "cached_transcript.json"
+CACHED_TRANSCRIPT = REPO_ROOT / "data" / "demo" / "captions" / "cached_transcript.json"
 CONFIG = REPO_ROOT / "config" / "demo.yaml"
 
 
@@ -96,34 +94,9 @@ class CaptioningTests(unittest.TestCase):
             self.assertEqual(summary["asr_chunk_length_seconds"], 4)
             self.assertTrue(summary["asr_dynamic_chunking"])
             self.assertEqual(summary["asr_pause_seconds"], 0.7)
-            self.assertEqual(summary["asr_max_new_tokens"], 440)
             self.assertTrue(summary["audio_path"].endswith("data\\demo\\audio\\1.mp3") or summary["audio_path"].endswith("data/demo/audio/1.mp3"))
             self.assertTrue((Path(temp_dir) / "captions.json").exists())
             self.assertTrue((Path(temp_dir) / "captions.vtt").exists())
-
-    def test_cli_accepts_asr_max_new_tokens_override(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            completed = subprocess.run(
-                [
-                    sys.executable,
-                    "-m",
-                    "src.pipeline.run_captioning_demo",
-                    "--config",
-                    str(CONFIG),
-                    "--mode",
-                    "cached",
-                    "--asr-max-new-tokens",
-                    "256",
-                    "--output-dir",
-                    temp_dir,
-                ],
-                cwd=REPO_ROOT,
-                check=True,
-                capture_output=True,
-                text=True,
-            )
-            summary = json.loads(completed.stdout)
-            self.assertEqual(summary["asr_max_new_tokens"], 256)
 
     def test_cli_accepts_asr_chunk_length_override(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -163,96 +136,14 @@ class CaptioningTests(unittest.TestCase):
             text=True,
         )
         models = json.loads(completed.stdout)
-        self.assertEqual(
-            models["typhoon_whisper"]["turbo"],
-            "typhoon-ai/typhoon-whisper-turbo",
-        )
-        self.assertEqual(
-            models["typhoon_whisper"]["large-v3"],
-            "typhoon-ai/typhoon-whisper-large-v3",
-        )
+        self.assertEqual(models["openai_whisper"]["turbo"], "turbo")
+        self.assertEqual(sorted(models), ["openai_whisper"])
 
     def test_asr_model_alias_resolution(self) -> None:
         self.assertEqual(resolve_asr_model_id("openai_whisper", "large"), "large")
-        self.assertEqual(
-            resolve_asr_model_id("typhoon_whisper", "turbo"),
-            "typhoon-ai/typhoon-whisper-turbo",
-        )
-        self.assertEqual(
-            resolve_asr_model_id("typhoon_whisper", "medium"),
-            "typhoon-ai/monsoon-whisper-medium-gigaspeech2",
-        )
-        self.assertEqual(
-            resolve_asr_model_id("typhoon_whisper", "isan-medium"),
-            "typhoon-ai/typhoon-isan-asr-whisper",
-        )
-        self.assertEqual(
-            resolve_asr_model_id("typhoon_whisper", "some-org/new-thai-asr"),
-            "some-org/new-thai-asr",
-        )
-        self.assertIn("typhoon_whisper", available_asr_models())
-
-    def test_safe_whisper_max_new_tokens_leaves_decoder_prompt_room(self) -> None:
-        self.assertEqual(safe_whisper_max_new_tokens(448, 448), 440)
-        self.assertEqual(safe_whisper_max_new_tokens(999, 448), 440)
-        self.assertEqual(safe_whisper_max_new_tokens(128, 448), 128)
-        self.assertEqual(safe_whisper_max_new_tokens(256, None), 256)
-
-    def test_typhoon_audio_windows_create_timed_segments_without_text_splitting(self) -> None:
-        windows = [
-            AudioWindow(0.0, 4.0, [0.0], 16_000),
-            AudioWindow(4.0, 8.0, [0.0], 16_000),
-        ]
-
-        class FakePipe:
-            def __init__(self) -> None:
-                self.calls = 0
-
-            def __call__(self, audio, generate_kwargs):
-                self.calls += 1
-                return {"text": f"chunk {self.calls}"}
-
-        fake_pipe = FakePipe()
-        with patch("src.ai.captioning.iter_audio_windows", return_value=iter(windows)):
-            segments = transcribe_audio_windows(
-                pipe=fake_pipe,
-                audio_path=Path("demo.mp3"),
-                language="th",
-                source="typhoon_whisper:test",
-                chunk_length_seconds=4,
-                max_new_tokens=440,
-                dynamic_chunking=True,
-            )
-
-        self.assertEqual(
-            [(segment.start, segment.end, segment.text) for segment in segments],
-            [(0.0, 4.0, "chunk 1"), (4.0, 8.0, "chunk 2")],
-        )
-
-    def test_typhoon_chunk_timestamps_are_offset_by_audio_window(self) -> None:
-        windows = [AudioWindow(8.0, 12.0, [0.0], 16_000)]
-
-        def fake_pipe(audio, generate_kwargs):
-            return {
-                "chunks": [
-                    {"timestamp": (0.5, 1.5), "text": "inside window"},
-                ]
-            }
-
-        with patch("src.ai.captioning.iter_audio_windows", return_value=iter(windows)):
-            segments = transcribe_audio_windows(
-                pipe=fake_pipe,
-                audio_path=Path("demo.mp3"),
-                language="th",
-                source="typhoon_whisper:test",
-                chunk_length_seconds=4,
-                max_new_tokens=440,
-                dynamic_chunking=True,
-            )
-
-        self.assertEqual(segments[0].start, 8.5)
-        self.assertEqual(segments[0].end, 9.5)
-        self.assertEqual(segments[0].text, "inside window")
+        self.assertIn("openai_whisper", available_asr_models())
+        with self.assertRaises(ValueError):
+            resolve_asr_model_id("unsupported_asr", "turbo")
 
     def test_pause_audio_windows_split_on_speaker_pause(self) -> None:
         import numpy as np
@@ -392,8 +283,8 @@ class CaptioningTests(unittest.TestCase):
                 RealtimeAudioFileDemoConfig(
                     audio_path=REPO_ROOT / "data" / "demo" / "audio" / "1.mp3",
                     output_dir=Path(temp_dir),
-                    catalog_path=REPO_ROOT / "data" / "demo" / "product_catalog.csv",
-                    promotions_path=REPO_ROOT / "data" / "demo" / "promotions.csv",
+                    catalog_path=REPO_ROOT / "data" / "demo" / "catalog" / "product_catalog.csv",
+                    promotions_path=REPO_ROOT / "data" / "demo" / "catalog" / "promotions.csv",
                 ),
                 playback_gate=gate,
                 asr=asr,
@@ -448,8 +339,8 @@ class CaptioningTests(unittest.TestCase):
                 RealtimeAudioFileDemoConfig(
                     audio_path=REPO_ROOT / "data" / "demo" / "audio" / "1.mp3",
                     output_dir=Path(temp_dir),
-                    catalog_path=REPO_ROOT / "data" / "demo" / "product_catalog.csv",
-                    promotions_path=REPO_ROOT / "data" / "demo" / "promotions.csv",
+                    catalog_path=REPO_ROOT / "data" / "demo" / "catalog" / "product_catalog.csv",
+                    promotions_path=REPO_ROOT / "data" / "demo" / "catalog" / "promotions.csv",
                 ),
                 playback_gate=gate,
                 asr=asr,
@@ -521,8 +412,8 @@ class CaptioningTests(unittest.TestCase):
                     RealtimeAudioFileDemoConfig(
                         audio_path=REPO_ROOT / "data" / "demo" / "audio" / "1.mp3",
                         output_dir=Path(temp_dir),
-                        catalog_path=REPO_ROOT / "data" / "demo" / "product_catalog.csv",
-                        promotions_path=REPO_ROOT / "data" / "demo" / "promotions.csv",
+                        catalog_path=REPO_ROOT / "data" / "demo" / "catalog" / "product_catalog.csv",
+                        promotions_path=REPO_ROOT / "data" / "demo" / "catalog" / "promotions.csv",
                     ),
                     playback_gate=gate,
                     windows=windows,

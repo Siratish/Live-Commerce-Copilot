@@ -13,12 +13,9 @@ import uuid
 
 from src.ai.captioning import (
     CaptioningUnavailable,
-    _segments_from_transformers_asr_result,
     normalize_asr_provider,
     resolve_asr_model_id,
-    safe_whisper_max_new_tokens,
     save_caption_json,
-    typhoon_language,
 )
 from src.ai.commerce_actions import generate_commerce_actions, save_commerce_actions
 from src.ai.decision import CommerceDecisionProvider
@@ -36,15 +33,14 @@ class LiveMicDemoConfig:
     language: str = "th"
     asr_provider: str = "openai_whisper"
     asr_model: str = "base"
-    asr_max_new_tokens: int = 256
     install_asr_deps: bool = False
     show_debug_panel: bool = True
     continuous_recording: bool = True
     max_queue_chunks: int = 16
     poll_interval_seconds: float = 0.25
     output_dir: Path = Path("outputs/live_mic")
-    catalog_path: Path = Path("data/demo/product_catalog.csv")
-    promotions_path: Path = Path("data/demo/promotions.csv")
+    catalog_path: Path = Path("data/demo/catalog/product_catalog.csv")
+    promotions_path: Path = Path("data/demo/catalog/promotions.csv")
 
 
 class BrowserMicChunkSource:
@@ -198,7 +194,7 @@ def preload_openai_whisper_model(model_name: str = "turbo") -> Any:
         import whisper  # type: ignore
     except ImportError as exc:
         raise CaptioningUnavailable(
-            "openai-whisper is not installed. Set install_asr_deps=True or run pip install -r requirements-asr.txt."
+            "openai-whisper is not installed. Set install_asr_deps=True or install the openai-whisper package."
         ) from exc
 
     if model_name not in _OPENAI_WHISPER_MODEL_CACHE:
@@ -249,74 +245,6 @@ class _OpenAIWhisperLiveASR:
                 )
             )
         return repair_caption_timestamps(segments)
-
-
-class _TyphoonWhisperLiveASR:
-    def __init__(
-        self,
-        model_id: str,
-        language: str,
-        chunk_seconds: float,
-        max_new_tokens: int,
-    ):
-        try:
-            import torch  # type: ignore
-            from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, pipeline  # type: ignore
-        except ImportError as exc:
-            raise CaptioningUnavailable(
-                "Typhoon Whisper requires transformers, torch, and accelerate. Set install_asr_deps=True or run pip install -r requirements-asr.txt."
-            ) from exc
-
-        print(f"Loading Typhoon Whisper model {model_id}. This may take a while.")
-        self.model_id = model_id
-        self.language = language
-        self.chunk_seconds = chunk_seconds
-        device = "cuda:0" if torch.cuda.is_available() else "cpu"
-        torch_dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
-        model = AutoModelForSpeechSeq2Seq.from_pretrained(
-            model_id,
-            torch_dtype=torch_dtype,
-            low_cpu_mem_usage=True,
-            use_safetensors=True,
-        )
-        model.to(device)
-        self.max_new_tokens = safe_whisper_max_new_tokens(
-            requested=max_new_tokens,
-            max_target_positions=getattr(model.config, "max_target_positions", None),
-        )
-        processor = AutoProcessor.from_pretrained(model_id)
-        self.pipe = pipeline(
-            "automatic-speech-recognition",
-            model=model,
-            tokenizer=processor.tokenizer,
-            feature_extractor=processor.feature_extractor,
-            chunk_length_s=max(1, int(chunk_seconds)),
-            batch_size=1,
-            return_timestamps=True,
-            torch_dtype=torch_dtype,
-            device=device,
-        )
-
-    def transcribe_chunk(
-        self,
-        chunk_path: Path,
-        offset_seconds: float,
-        fallback_duration_seconds: float,
-    ) -> List[CaptionSegment]:
-        raw = self.pipe(
-            str(chunk_path),
-            generate_kwargs={
-                "language": typhoon_language(self.language),
-                "max_new_tokens": self.max_new_tokens,
-            },
-        )
-        return _segments_from_transformers_asr_result(
-            raw,
-            source=f"live_mic_typhoon_whisper:{self.model_id}",
-            offset_seconds=offset_seconds,
-            fallback_start=offset_seconds,
-            fallback_end=offset_seconds + fallback_duration_seconds,
-        )
 
 
 def run_colab_live_mic_demo(
@@ -662,7 +590,15 @@ def _optional_float(value: Any) -> Optional[float]:
 def _install_asr_dependencies(install: bool) -> None:
     if install:
         subprocess.check_call(
-            [sys.executable, "-m", "pip", "install", "-q", "-r", "requirements-asr.txt"]
+            [
+                sys.executable,
+                "-m",
+                "pip",
+                "install",
+                "-q",
+                "openai-whisper",
+                "numpy>=1.23.0",
+            ]
         )
 
 
@@ -677,13 +613,6 @@ def _build_live_asr(config: LiveMicDemoConfig):
     model_id = resolve_asr_model_id(provider, config.asr_model)
     if provider == "openai_whisper":
         return _OpenAIWhisperLiveASR(model_id, config.language)
-    if provider == "typhoon_whisper":
-        return _TyphoonWhisperLiveASR(
-            model_id=model_id,
-            language=config.language,
-            chunk_seconds=config.chunk_seconds,
-            max_new_tokens=config.asr_max_new_tokens,
-        )
     raise CaptioningUnavailable(f"unsupported live mic ASR provider: {config.asr_provider}")
 
 

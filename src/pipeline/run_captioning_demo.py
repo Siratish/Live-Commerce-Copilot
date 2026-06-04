@@ -83,7 +83,6 @@ def run_from_config(
     asr_provider_override: Optional[str] = None,
     asr_model_override: Optional[str] = None,
     asr_chunk_length_seconds_override: Optional[int] = None,
-    asr_max_new_tokens_override: Optional[int] = None,
 ) -> Dict[str, Any]:
     config = load_config(config_path)
     captioning = config.get("captioning", {})
@@ -115,12 +114,6 @@ def run_from_config(
         asr_pause_seconds=float(captioning.get("asr_pause_seconds", 0.7)),
         asr_silence_threshold=float(captioning.get("asr_silence_threshold", 0.012)),
         asr_frame_seconds=float(captioning.get("asr_frame_seconds", 0.1)),
-        asr_batch_size=int(captioning.get("asr_batch_size", 16)),
-        asr_max_new_tokens=int(
-            asr_max_new_tokens_override
-            if asr_max_new_tokens_override is not None
-            else captioning.get("asr_max_new_tokens", 440)
-        ),
         allow_cached_fallback=bool(captioning.get("allow_cached_fallback", True)),
     )
     output_dir = (
@@ -152,7 +145,6 @@ def run_from_config(
         "asr_min_chunk_seconds": settings.asr_min_chunk_seconds,
         "asr_pause_seconds": settings.asr_pause_seconds,
         "asr_silence_threshold": settings.asr_silence_threshold,
-        "asr_max_new_tokens": settings.asr_max_new_tokens,
         "audio_path": str(settings.audio_path) if settings.audio_path else None,
         "metrics": metrics,
         "outputs": {key: str(value) for key, value in paths.items()},
@@ -168,38 +160,26 @@ def build_parser() -> ArgumentParser:
     )
     parser.add_argument(
         "--mode",
-        choices=["cached", "auto", "whisper", "openai_whisper", "typhoon", "typhoon_whisper"],
+        choices=["cached", "auto", "whisper", "openai_whisper"],
         default=None,
         help="Override captioning mode from config.",
     )
     parser.add_argument(
         "--asr-provider",
-        choices=["openai_whisper", "typhoon_whisper"],
+        choices=["openai_whisper"],
         default=None,
         help="ASR provider for auto mode.",
     )
     parser.add_argument(
         "--asr-model",
         default=None,
-        help=(
-            "ASR model alias or full model id. Typhoon aliases include "
-            "large-v3, turbo, medium, and isan-medium."
-        ),
-    )
-    parser.add_argument(
-        "--asr-max-new-tokens",
-        type=int,
-        default=None,
-        help=(
-            "Maximum generated decoder tokens for Transformers Whisper models. "
-            "Values are clamped below the model decoder limit."
-        ),
+        help="OpenAI Whisper model alias.",
     )
     parser.add_argument(
         "--asr-chunk-length-seconds",
         type=int,
         default=None,
-        help="Maximum audio window size for Typhoon streaming ASR.",
+        help="Maximum audio window size for pause-aware streaming demos.",
     )
     parser.add_argument(
         "--list-asr-models",
@@ -226,7 +206,6 @@ def main() -> None:
         asr_provider_override=args.asr_provider,
         asr_model_override=args.asr_model,
         asr_chunk_length_seconds_override=args.asr_chunk_length_seconds,
-        asr_max_new_tokens_override=args.asr_max_new_tokens,
     )
     print(json.dumps(summary, indent=2))
 

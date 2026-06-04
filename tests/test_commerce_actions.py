@@ -20,15 +20,8 @@ from src.ai.commerce_actions import (
     normalize_promo_code,
 )
 from src.ai.decision import (
-    CallableModelDecisionProvider,
-    CommerceCandidates,
     CommerceDecision,
-    CommerceSessionState,
-    DEFAULT_TYPHOON_MODEL_ID,
-    TranscriptWindow,
-    Typhoon25DecisionProvider,
-    TyphoonSDecisionProvider,
-    extract_json_mapping,
+    DeterministicDecisionProvider,
 )
 from src.ai.retrieval import ProductPromoRetriever, extract_numbers
 from src.data.catalog import load_product_catalog, load_promotions
@@ -38,10 +31,9 @@ from src.utils.action_timeline import build_action_timeline_html
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-CAPTIONS = REPO_ROOT / "data" / "demo" / "audio_1_captions.json"
-TURBO_CAPTIONS = REPO_ROOT / "data" / "demo" / "audio_1_captions_turbo.json"
-CATALOG = REPO_ROOT / "data" / "demo" / "product_catalog.csv"
-PROMOTIONS = REPO_ROOT / "data" / "demo" / "promotions.csv"
+CAPTIONS = REPO_ROOT / "data" / "demo" / "captions" / "audio_1_captions.json"
+CATALOG = REPO_ROOT / "data" / "demo" / "catalog" / "product_catalog.csv"
+PROMOTIONS = REPO_ROOT / "data" / "demo" / "catalog" / "promotions.csv"
 AUDIO = REPO_ROOT / "data" / "demo" / "audio" / "1.mp3"
 
 
@@ -148,8 +140,8 @@ class CommerceActionTests(unittest.TestCase):
         self.assertIn("SHOW_BUNDLE_RECOMMENDATION", html)
         self.assertIn("data:audio/mpeg;base64,", html)
 
-    def test_turbo_transcript_variants_still_generate_expected_actions(self) -> None:
-        captions = load_caption_result(TURBO_CAPTIONS)
+    def test_canonical_audio1_transcript_generates_expected_actions(self) -> None:
+        captions = load_caption_result(CAPTIONS)
         actions = generate_commerce_actions(captions, self.catalog, self.promotions)
         sequence = [(action.action_type, action.skus, round(action.timestamp, 2)) for action in actions]
         self.assertEqual(
@@ -290,7 +282,7 @@ class CommerceActionTests(unittest.TestCase):
         self.assertEqual(earbuds_card.display_payload["product"]["price"], 1290)
         self.assertEqual(earbuds_card.display_payload["product"]["discount_price"], 990)
 
-    def test_invalid_model_decisions_are_rejected_by_validation(self) -> None:
+    def test_invalid_provider_decisions_are_rejected_by_validation(self) -> None:
         class BadDecisionProvider:
             def decide(self, window, candidates, state, catalog, promotions):
                 return CommerceDecision(
@@ -319,65 +311,6 @@ class CommerceActionTests(unittest.TestCase):
             decision_provider=BadDecisionProvider(),
         )
         self.assertEqual(actions, [])
-
-    def test_callable_model_provider_accepts_structured_output(self) -> None:
-        provider = CallableModelDecisionProvider(
-            lambda payload: {
-                "action_type": "SHOW_BUNDLE_RECOMMENDATION",
-                "confidence": 0.86,
-                "product_sku": "SKU002",
-                "product_confidence": 0.91,
-                "promo_code": "LIVE25",
-                "promo_confidence": 0.88,
-                "bundle_skus": ["SKU002", "SKU001"],
-                "bundle_confidence": 0.86,
-                "flash_minutes": 5,
-                "flash_confidence": 0.84,
-            }
-        )
-        decision = provider.decide(
-            TranscriptWindow(index=0, start=0.0, text="test"),
-            CommerceCandidates(products=[], bundle_products=[], promotions=[]),
-            CommerceSessionState(),
-            self.catalog,
-            self.promotions,
-        )
-        self.assertEqual(decision.product_sku, "SKU002")
-        self.assertEqual(decision.promo_code, "LIVE25")
-        self.assertEqual(decision.bundle_skus, ["SKU002", "SKU001"])
-        self.assertEqual(decision.flash_minutes, 5)
-        self.assertEqual(decision.action_type, SHOW_BUNDLE_RECOMMENDATION)
-
-    def test_model_payload_includes_catalog_promotions_and_previous_texts(self) -> None:
-        captured = {}
-
-        def capture_payload(payload):
-            captured.update(payload)
-            return {"action_type": "NO_ACTION", "confidence": 0}
-
-        provider = CallableModelDecisionProvider(capture_payload)
-        decision = provider.decide(
-            TranscriptWindow(
-                index=3,
-                start=9.0,
-                text="วันนี้ใช้คู่กัน",
-                next_text="ลดเหลือ 199 บาท",
-                previous_texts=("ตัวแรกเป็นเซรั่ม", "ราคา 399", "ใช้โค้ด LIVE25"),
-            ),
-            CommerceCandidates(products=[], bundle_products=[], promotions=[]),
-            CommerceSessionState(active_sku="SKU001", active_promo_code="LIVE25"),
-            self.catalog,
-            self.promotions,
-        )
-
-        self.assertIsNone(decision.action_type)
-        self.assertEqual(captured["window"]["previous_texts"], ["ตัวแรกเป็นเซรั่ม", "ราคา 399", "ใช้โค้ด LIVE25"])
-        self.assertIn("history_text", captured["window"])
-        self.assertEqual(len(captured["catalog"]), len(self.catalog))
-        self.assertEqual(len(captured["promotions"]), len(self.promotions))
-        self.assertIn("discount_price", captured["catalog"][0])
-        self.assertNotIn("deeplink", captured["catalog"][0])
-        self.assertIn("eligible_categories", captured["promotions"][0])
 
     def test_action_windows_include_unresolved_history_segments(self) -> None:
         seen_previous = []
@@ -473,7 +406,7 @@ class CommerceActionTests(unittest.TestCase):
 
         self.assertEqual(seen_history, ["aaaa", "aaaa bbbb", "bbbb cccc"])
 
-    def test_model_action_type_limits_output_to_one_action_per_segment(self) -> None:
+    def test_provider_action_type_limits_output_to_one_action_per_segment(self) -> None:
         class SingleActionProvider:
             def decide(self, window, candidates, state, catalog, promotions):
                 return CommerceDecision(
@@ -506,7 +439,7 @@ class CommerceActionTests(unittest.TestCase):
 
         self.assertEqual([action.action_type for action in actions], [PIN_PRODUCT_CARD])
 
-    def test_model_unsupported_action_type_is_ignored(self) -> None:
+    def test_provider_unsupported_action_type_is_ignored(self) -> None:
         class UnsupportedActionProvider:
             def decide(self, window, candidates, state, catalog, promotions):
                 return CommerceDecision(
@@ -536,78 +469,11 @@ class CommerceActionTests(unittest.TestCase):
 
         self.assertEqual(actions, [])
 
-    def test_typhoon_s_provider_accepts_json_output(self) -> None:
-        def fake_generator(messages):
-            return """
-            ```json
-            {
-              "product_sku": "SKU002",
-              "product_confidence": 0.92,
-              "promo_code": "LIVE25",
-              "promo_confidence": 0.81,
-              "bundle_skus": ["SKU002", "SKU001"],
-              "bundle_confidence": 0.88,
-              "flash_minutes": 5,
-              "flash_confidence": 0.77
-            }
-            ```
-            """
-
-        provider = Typhoon25DecisionProvider(text_generator=fake_generator)
-        decision = provider.decide(
-            TranscriptWindow(index=0, start=0.0, text="test"),
-            CommerceCandidates(products=[], bundle_products=[], promotions=[]),
-            CommerceSessionState(),
-            self.catalog,
-            self.promotions,
-        )
-        self.assertEqual(decision.product_sku, "SKU002")
-        self.assertEqual(decision.promo_code, "LIVE25")
-        self.assertEqual(decision.bundle_skus, ["SKU002", "SKU001"])
-        self.assertEqual(decision.flash_minutes, 5)
-
-    def test_typhoon_s_provider_falls_back_on_invalid_json(self) -> None:
-        provider = Typhoon25DecisionProvider(text_generator=lambda messages: "not json")
-        window = TranscriptWindow(index=0, start=0.0, text="Green Tea Cleanser")
-        candidates = CommerceCandidates(
-            products=ProductPromoRetriever.build(self.catalog, self.promotions).retrieve_products(
-                "Green Tea Cleanser",
-                top_k=5,
-            ),
-            bundle_products=[],
-            promotions=[],
-        )
-        decision = provider.decide(
-            window,
-            candidates,
-            CommerceSessionState(),
-            self.catalog,
-            self.promotions,
-        )
-        self.assertEqual(decision.product_sku, "SKU002")
-
-    def test_typhoon_s_json_extraction_accepts_wrapped_text(self) -> None:
-        parsed = extract_json_mapping('extra {"product_sku": "SKU001"} text')
-        self.assertEqual(parsed["product_sku"], "SKU001")
-
-    def test_typhoon_s_provider_unload_is_safe_without_loaded_model(self) -> None:
-        provider = Typhoon25DecisionProvider(text_generator=lambda messages: "{}")
-        provider.unload_model()
-        self.assertIsNone(provider._model)
-        self.assertIsNone(provider._tokenizer)
-
-    def test_create_decision_provider_supports_typhoon_s(self) -> None:
-        provider = create_decision_provider("typhoon_s")
-        self.assertIsInstance(provider, Typhoon25DecisionProvider)
-        self.assertEqual(provider.model_id, DEFAULT_TYPHOON_MODEL_ID)
-
-    def test_create_decision_provider_supports_typhoon25_alias(self) -> None:
-        provider = create_decision_provider("typhoon25")
-        self.assertIsInstance(provider, Typhoon25DecisionProvider)
-        self.assertEqual(provider.model_id, "scb10x/typhoon2.5-qwen3-4b")
-
-    def test_typhoon_s_provider_name_is_legacy_alias(self) -> None:
-        self.assertIs(TyphoonSDecisionProvider, Typhoon25DecisionProvider)
+    def test_create_decision_provider_is_deterministic_only(self) -> None:
+        provider = create_decision_provider("deterministic")
+        self.assertIsInstance(provider, DeterministicDecisionProvider)
+        with self.assertRaises(ValueError):
+            create_decision_provider("unsupported_provider")
 
     def test_retrieval_scales_to_10k_skus(self) -> None:
         synthetic_catalog = _synthetic_catalog(10_000)

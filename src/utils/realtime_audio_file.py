@@ -40,12 +40,11 @@ class RealtimeAudioFileDemoConfig:
     language: str = "th"
     asr_provider: str = "openai_whisper"
     asr_model: str = "base"
-    asr_max_new_tokens: int = 256
     install_asr_deps: bool = False
     playback_poll_seconds: float = 0.25
     output_dir: Path = Path("outputs/realtime_audio_file")
-    catalog_path: Path = Path("data/demo/product_catalog.csv")
-    promotions_path: Path = Path("data/demo/promotions.csv")
+    catalog_path: Path = Path("data/demo/catalog/product_catalog.csv")
+    promotions_path: Path = Path("data/demo/catalog/promotions.csv")
 
 
 class WallClockPlaybackGate:
@@ -255,7 +254,15 @@ def run_realtime_audio_file_demo(
     """Replay an audio file as a live stream and process chunks after playback passes them."""
     if config.install_asr_deps:
         subprocess.check_call(
-            [sys.executable, "-m", "pip", "install", "-q", "-r", "requirements-asr.txt"]
+            [
+                sys.executable,
+                "-m",
+                "pip",
+                "install",
+                "-q",
+                "openai-whisper",
+                "numpy>=1.23.0",
+            ]
         )
 
     if not config.audio_path.exists():
@@ -575,19 +582,12 @@ def _default_playback_gate(
 
 
 def _build_file_stream_asr(config: RealtimeAudioFileDemoConfig) -> Any:
-    from src.utils.live_mic import _OpenAIWhisperLiveASR, _TyphoonWhisperLiveASR
+    from src.utils.live_mic import _OpenAIWhisperLiveASR
 
     provider = normalize_asr_provider(config.asr_provider)
     model_id = resolve_asr_model_id(provider, config.asr_model)
     if provider == "openai_whisper":
         return _OpenAIWhisperLiveASR(model_id, config.language)
-    if provider == "typhoon_whisper":
-        return _TyphoonWhisperLiveASR(
-            model_id=model_id,
-            language=config.language,
-            chunk_seconds=config.chunk_seconds,
-            max_new_tokens=config.asr_max_new_tokens,
-        )
     raise ValueError(f"unsupported file-stream ASR provider: {config.asr_provider}")
 
 

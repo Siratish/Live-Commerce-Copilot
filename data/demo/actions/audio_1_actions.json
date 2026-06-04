@@ -106,7 +106,7 @@
           "deeplink": "https://trueid.example/live/product/SKU001"
         }
       ],
-      "reason": "Model-assisted transcript decision matched compatible catalog products."
+      "reason": "Transcript cues matched compatible catalog products."
     }
   },
   {
