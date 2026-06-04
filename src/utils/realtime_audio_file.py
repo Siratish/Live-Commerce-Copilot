@@ -636,9 +636,16 @@ def _build_realtime_audio_file_html(
     #{widget_id} .rt-action-title{{font-size:16px;font-weight:800;margin-bottom:4px}}
     #{widget_id} .rt-action-meta{{font-size:14px;color:#111827;line-height:1.35}}
     #{widget_id} .rt-action-time{{font-size:12px;color:#667085;margin-top:6px}}
+    #{widget_id} .rt-product-row{{display:flex;align-items:center;gap:10px;margin-top:2px}}
+    #{widget_id} .rt-product-thumb{{width:52px;height:52px;border-radius:8px;background:#fee4e2;color:#9e2a23;display:flex;align-items:center;justify-content:center;font-weight:900;flex:0 0 auto;box-shadow:inset 0 0 0 1px rgba(158,42,35,.08)}}
+    #{widget_id} .rt-product-info{{min-width:0;display:flex;flex-direction:column;gap:2px}}
+    #{widget_id} .rt-product-name{{font-size:15px;font-weight:900;color:#111827;line-height:1.2}}
+    #{widget_id} .rt-product-meta{{font-size:13px;color:#667085;line-height:1.3}}
+    #{widget_id} .rt-product-price{{font-size:14px;font-weight:900;color:#b42318}}
     #{widget_id} .rt-promo-badge{{align-self:flex-start;border-radius:8px;background:#b42318;color:#fff;padding:7px 10px;font-size:18px;font-weight:900;letter-spacing:.04em}}
     #{widget_id} .rt-countdown-time{{font-size:30px;line-height:1;font-weight:900;color:#b42318}}
-    #{widget_id} .rt-bundle-row{{font-weight:800;color:#166534}}
+    #{widget_id} .rt-bundle-row{{display:flex;align-items:center;gap:8px;flex-wrap:wrap}}
+    #{widget_id} .rt-bundle-plus{{font-size:18px;font-weight:900;color:#166534}}
     #{widget_id} .rt-empty{{border:1px solid #d0d5dd;border-radius:8px;padding:12px;color:#667085;background:#fff}}
     @media (max-width: 900px){{#{widget_id} .rt-grid{{grid-template-columns:1fr}}}}
   </style>
@@ -748,6 +755,29 @@ def _build_realtime_audio_file_js(
       .toLowerCase()
       .replace(/_/g, " ")
       .replace(/\\b\\w/g, match => match.toUpperCase());
+    const initials = value => String(value || "P")
+      .split(/\\s+/)
+      .filter(Boolean)
+      .slice(0, 2)
+      .map(part => part.charAt(0).toUpperCase())
+      .join("") || "P";
+    const productVisual = product => {{
+      const item = product || {{}};
+      const label = item.product_name || item.sku || "Product";
+      return `<div class="rt-product-row">
+        <div class="rt-product-thumb">${{escapeHtml(initials(label))}}</div>
+        <div class="rt-product-info">
+          <div class="rt-product-name">${{escapeHtml(label)}}</div>
+          <div class="rt-product-meta">${{escapeHtml(item.brand || item.category || "")}}</div>
+          ${{item.discount_price ? `<div class="rt-product-price">THB ${{escapeHtml(item.discount_price)}}</div>` : ""}}
+        </div>
+      </div>`;
+    }};
+    const skuVisual = sku => `<div class="rt-product-thumb">${{escapeHtml(initials(sku))}}</div>`;
+    const skuList = action => String(action.skus || "")
+      .split("+")
+      .map(value => value.trim())
+      .filter(Boolean);
     const captionKey = row => `${{Number(row.start || 0).toFixed(2)}}|${{Number(row.end || 0).toFixed(2)}}|${{row.text || ""}}`;
     const showNextCaption = () => {{
       if (!captionQueue.length) {{
@@ -798,7 +828,7 @@ def _build_realtime_audio_file_js(
         return `
           <div class="rt-action-card rt-action-pin">
             <div class="rt-action-top"><strong>${{escapeHtml(product.product_name || action.title || "Pinned product")}}</strong><div class="rt-action-time">${{time}}</div></div>
-            <div class="rt-action-meta">THB ${{escapeHtml(product.discount_price || "")}} <span style="color:#667085">${{escapeHtml(product.brand || "")}}</span></div>
+            ${{productVisual(product)}}
           </div>`;
       }}
       if (type === "SHOW_PROMO_CODE") {{
@@ -810,17 +840,25 @@ def _build_realtime_audio_file_js(
           </div>`;
       }}
       if (type === "SHOW_BUNDLE_RECOMMENDATION") {{
+        const products = Array.isArray(payload.products) ? payload.products : [];
+        const visuals = products.length
+          ? products.map(productVisual).join('<div class="rt-bundle-plus">+</div>')
+          : skuList(action).map(skuVisual).join('<div class="rt-bundle-plus">+</div>');
         return `
           <div class="rt-action-card rt-action-bundle">
             <div class="rt-action-top"><strong>${{escapeHtml(action.title || "Recommended bundle")}}</strong><div class="rt-action-time">${{time}}</div></div>
-            <div class="rt-bundle-row">${{escapeHtml(action.skus || "-")}}</div>
+            <div class="rt-bundle-row">${{visuals}}</div>
+            <div class="rt-action-meta">${{escapeHtml(payload.reason || "Products pair well together")}}</div>
           </div>`;
       }}
       if (type === "START_FLASH_SALE_COUNTDOWN") {{
+        const products = Array.isArray(payload.products) ? payload.products : [];
+        const productAttach = payload.product ? productVisual(payload.product) : "";
+        const bundleAttach = products.length ? `<div class="rt-bundle-row">${{products.map(productVisual).join('<div class="rt-bundle-plus">+</div>')}}</div>` : "";
         return `
           <div class="rt-action-card rt-action-countdown">
             <div class="rt-action-top"><strong>Flash sale countdown</strong><div class="rt-action-time">${{time}}</div></div>
-            ${{payload.promo_code ? `<div class="rt-promo-badge">${{escapeHtml(payload.promo_code)}}</div>` : `<div class="rt-action-title">${{escapeHtml(action.title || "Live deal")}}</div>`}}
+            ${{payload.promo_code ? `<div class="rt-promo-badge">${{escapeHtml(payload.promo_code)}}</div>` : (productAttach || bundleAttach || `<div class="rt-action-title">${{escapeHtml(action.title || "Live deal")}}</div>`)}}
             <div class="rt-countdown-time">${{formatRemaining(action, now)}}</div>
           </div>`;
       }}
@@ -842,7 +880,7 @@ def _build_realtime_audio_file_js(
       }}
       const current = items[items.length - 1];
       if (currentTarget) currentTarget.innerHTML = renderActionCard(current, now);
-      if (target) target.innerHTML = items.slice(-6).map(action => renderActionCard(action, now)).join("");
+      if (target) target.innerHTML = items.slice(-6).reverse().map(action => renderActionCard(action, now)).join("");
     }};
     const updateTime = () => {{
       const total = duration();

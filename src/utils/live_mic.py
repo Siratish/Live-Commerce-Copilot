@@ -1261,9 +1261,16 @@ def install_colab_live_mic_debug_panel(
                 #live-commerce-mic-debug .lm-action-title{font-size:16px;font-weight:800;margin-bottom:4px}
                 #live-commerce-mic-debug .lm-action-meta{font-size:14px;color:#111827;line-height:1.35}
                 #live-commerce-mic-debug .lm-action-time{font-size:12px;color:#667085;margin-top:6px}
+                #live-commerce-mic-debug .lm-product-row{display:flex;align-items:center;gap:10px;margin-top:2px}
+                #live-commerce-mic-debug .lm-product-thumb{width:52px;height:52px;border-radius:8px;background:#fee4e2;color:#9e2a23;display:flex;align-items:center;justify-content:center;font-weight:900;flex:0 0 auto;box-shadow:inset 0 0 0 1px rgba(158,42,35,.08)}
+                #live-commerce-mic-debug .lm-product-info{min-width:0;display:flex;flex-direction:column;gap:2px}
+                #live-commerce-mic-debug .lm-product-name{font-size:15px;font-weight:900;color:#111827;line-height:1.2}
+                #live-commerce-mic-debug .lm-product-meta{font-size:13px;color:#667085;line-height:1.3}
+                #live-commerce-mic-debug .lm-product-price{font-size:14px;font-weight:900;color:#b42318}
                 #live-commerce-mic-debug .lm-promo-badge{align-self:flex-start;border-radius:8px;background:#b42318;color:#fff;padding:7px 10px;font-size:18px;font-weight:900;letter-spacing:.04em}
                 #live-commerce-mic-debug .lm-countdown-time{font-size:30px;line-height:1;font-weight:900;color:#b42318}
-                #live-commerce-mic-debug .lm-bundle-row{font-weight:800;color:#166534}
+                #live-commerce-mic-debug .lm-bundle-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+                #live-commerce-mic-debug .lm-bundle-plus{font-size:18px;font-weight:900;color:#166534}
                 #live-commerce-mic-debug .lm-empty{border:1px solid #d0d5dd;border-radius:8px;padding:12px;color:#667085;background:#fff}
                 @media (max-width: 900px){#live-commerce-mic-debug .lm-grid{grid-template-columns:1fr}}
               </style>
@@ -1319,6 +1326,29 @@ def install_colab_live_mic_debug_panel(
                 .toLowerCase()
                 .replace(/_/g, ' ')
                 .replace(/\b\w/g, match => match.toUpperCase());
+              const initials = value => String(value || 'P')
+                .split(/\s+/)
+                .filter(Boolean)
+                .slice(0, 2)
+                .map(part => part.charAt(0).toUpperCase())
+                .join('') || 'P';
+              const productVisual = product => {
+                const item = product || {};
+                const label = item.product_name || item.sku || 'Product';
+                return `<div class="lm-product-row">
+                  <div class="lm-product-thumb">${escapeHtml(initials(label))}</div>
+                  <div class="lm-product-info">
+                    <div class="lm-product-name">${escapeHtml(label)}</div>
+                    <div class="lm-product-meta">${escapeHtml(item.brand || item.category || '')}</div>
+                    ${item.discount_price ? `<div class="lm-product-price">THB ${escapeHtml(item.discount_price)}</div>` : ''}
+                  </div>
+                </div>`;
+              };
+              const skuVisual = sku => `<div class="lm-product-thumb">${escapeHtml(initials(sku))}</div>`;
+              const skuList = action => String(action.skus || '')
+                .split('+')
+                .map(value => value.trim())
+                .filter(Boolean);
               let captionQueue = [];
               let captionDisplayActive = false;
               let captionTimer = null;
@@ -1377,7 +1407,7 @@ def install_colab_live_mic_debug_panel(
                   return `
                     <div class="lm-action-card lm-action-pin">
                       <div class="lm-action-top"><strong>${escapeHtml(product.product_name || action.title || 'Pinned product')}</strong><div class="lm-action-time">${time}</div></div>
-                      <div class="lm-action-meta">THB ${escapeHtml(product.discount_price || '')} <span style="color:#667085">${escapeHtml(product.brand || '')}</span></div>
+                      ${productVisual(product)}
                     </div>`;
                 }
                 if (type === 'SHOW_PROMO_CODE') {
@@ -1389,17 +1419,25 @@ def install_colab_live_mic_debug_panel(
                     </div>`;
                 }
                 if (type === 'SHOW_BUNDLE_RECOMMENDATION') {
+                  const products = Array.isArray(payload.products) ? payload.products : [];
+                  const visuals = products.length
+                    ? products.map(productVisual).join('<div class="lm-bundle-plus">+</div>')
+                    : skuList(action).map(skuVisual).join('<div class="lm-bundle-plus">+</div>');
                   return `
                     <div class="lm-action-card lm-action-bundle">
                       <div class="lm-action-top"><strong>${escapeHtml(action.title || 'Recommended bundle')}</strong><div class="lm-action-time">${time}</div></div>
-                      <div class="lm-bundle-row">${escapeHtml(action.skus || '-')}</div>
+                      <div class="lm-bundle-row">${visuals}</div>
+                      <div class="lm-action-meta">${escapeHtml(payload.reason || 'Products pair well together')}</div>
                     </div>`;
                 }
                 if (type === 'START_FLASH_SALE_COUNTDOWN') {
+                  const products = Array.isArray(payload.products) ? payload.products : [];
+                  const productAttach = payload.product ? productVisual(payload.product) : '';
+                  const bundleAttach = products.length ? `<div class="lm-bundle-row">${products.map(productVisual).join('<div class="lm-bundle-plus">+</div>')}</div>` : '';
                   return `
                     <div class="lm-action-card lm-action-countdown">
                       <div class="lm-action-top"><strong>Flash sale countdown</strong><div class="lm-action-time">${time}</div></div>
-                      ${payload.promo_code ? `<div class="lm-promo-badge">${escapeHtml(payload.promo_code)}</div>` : `<div class="lm-action-title">${escapeHtml(action.title || 'Live deal')}</div>`}
+                      ${payload.promo_code ? `<div class="lm-promo-badge">${escapeHtml(payload.promo_code)}</div>` : (productAttach || bundleAttach || `<div class="lm-action-title">${escapeHtml(action.title || 'Live deal')}</div>`)}
                       <div class="lm-countdown-time">${formatRemaining(action)}</div>
                     </div>`;
                 }
@@ -1421,7 +1459,7 @@ def install_colab_live_mic_debug_panel(
                 }
                 const current = items[items.length - 1];
                 if (currentTarget) currentTarget.innerHTML = renderActionCard(current);
-                if (target) target.innerHTML = items.slice(-6).map(renderActionCard).join('');
+                if (target) target.innerHTML = items.slice(-6).reverse().map(renderActionCard).join('');
               };
               window.setInterval(() => {
                 const root = latestRoot();
