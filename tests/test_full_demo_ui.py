@@ -6,13 +6,15 @@ import tempfile
 import unittest
 
 from src.data.catalog import load_product_catalog, load_promotions
-from src.schemas import ProductCatalogItem, Promotion
+from src.schemas import CaptionResult, CaptionSegment, CommerceAction, ProductCatalogItem, Promotion
 from src.utils.full_demo_ui import (
     FULL_DEMO_CHUNK_SECONDS,
     FULL_DEMO_DYNAMIC_CHUNKING,
     FULL_DEMO_PAUSE_SECONDS,
     FULL_DEMO_SILENCE_THRESHOLD,
     SAMPLE_AUDIO,
+    build_live_simulation_scene_html,
+    build_processing_scene_html,
     build_catalog_scene_html,
     run_recording_pipeline,
     save_product_catalog_csv,
@@ -122,6 +124,39 @@ class FullDemoUiTests(unittest.TestCase):
         self.assertGreater(len(captions.segments), 0)
         self.assertGreater(len(actions), 0)
         self.assertEqual(actions[0].skus, ["SKU005"])
+
+    def test_processing_scene_is_not_live_commerce_placeholder(self) -> None:
+        html = build_processing_scene_html("Processing recording", "Running ASR")
+
+        self.assertIn("Processing recording", html)
+        self.assertIn("Running ASR", html)
+        self.assertNotIn("LIVE COMMERCE", html)
+        self.assertNotIn("lc-video-art", html)
+
+    def test_live_simulation_scene_has_browser_start_stop_controls(self) -> None:
+        html = build_live_simulation_scene_html(
+            audio_path=SAMPLE_AUDIO["Audio 1 - Beauty"],
+            captions=CaptionResult(
+                language="th",
+                duration_seconds=1.0,
+                segments=[CaptionSegment(0.0, 1.0, "demo caption", "test")],
+            ),
+            actions=[
+                CommerceAction(
+                    timestamp=0.0,
+                    action_type="PIN_PRODUCT_CARD",
+                    skus=["SKU001"],
+                    confidence=1.0,
+                    evidence_text="demo",
+                    display_payload={"title": "Pin product"},
+                )
+            ],
+            source_label="Audio 1 - Beauty",
+        )
+
+        self.assertIn("Start / Continue", html)
+        self.assertIn("Stop input", html)
+        self.assertIn("demo caption", html)
 
 
 if __name__ == "__main__":

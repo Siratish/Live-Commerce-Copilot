@@ -20,11 +20,6 @@ from src.ai.commerce_actions import generate_commerce_actions, save_commerce_act
 from src.data.catalog import load_product_catalog, load_promotions
 from src.schemas import CommerceAction, ProductCatalogItem, Promotion
 from src.utils.action_timeline import save_action_timeline_html
-from src.utils.live_mic import LiveMicDemoConfig, run_colab_live_mic_demo
-from src.utils.realtime_audio_file import (
-    RealtimeAudioFileDemoConfig,
-    run_realtime_audio_file_demo,
-)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -136,12 +131,6 @@ def display_full_demo_ui(repo_root: Path = REPO_ROOT) -> None:
     catalog_output = widgets.Output()
     source_detail = widgets.VBox()
     selected_summary = widgets.HTML()
-    live_start_button = widgets.Button(
-        description="Start live stream",
-        icon="play",
-        button_style="danger",
-        layout=widgets.Layout(width="190px", height="42px"),
-    )
 
     mode_buttons: Dict[str, Any] = {
         "recording": widgets.Button(
@@ -319,17 +308,13 @@ def display_full_demo_ui(repo_root: Path = REPO_ROOT) -> None:
         state["mode"] = value
         refresh_selection_ui()
         if state.get("source") is not None:
-            if state["mode"] == "live":
-                render_live_ready_viewer()
-            elif state["source"] != "upload" or upload.value:
+            if state["source"] != "upload" or upload.value:
                 run_selected_source(force=True)
 
     def set_source(value: str) -> None:
         state["source"] = value
         refresh_selection_ui()
-        if state["mode"] == "live":
-            render_live_ready_viewer()
-        elif value != "upload":
+        if value != "upload":
             run_selected_source(force=True)
 
     for key, button in mode_buttons.items():
@@ -341,10 +326,7 @@ def display_full_demo_ui(repo_root: Path = REPO_ROOT) -> None:
         if change.get("new"):
             state["source"] = "upload"
             refresh_selection_ui(render_idle=False)
-            if state["mode"] == "live":
-                render_live_ready_viewer()
-            else:
-                run_selected_source(force=True)
+            run_selected_source(force=True)
 
     upload.observe(on_upload_change, names="value")
 
@@ -368,38 +350,10 @@ def display_full_demo_ui(repo_root: Path = REPO_ROOT) -> None:
                 )
             )
 
-    def render_live_ready_viewer() -> None:
-        audio_path = current_audio_path()
-        live_start_button.description = (
-            "Start live mic" if state["source"] == "mic" else "Start live stream"
-        )
-        live_start_button.icon = "microphone" if state["source"] == "mic" else "play"
-        with output:
-            output.clear_output(wait=True)
-            print(
-                "Live source selected. Use the Start control in the showcase "
-                "to begin processing."
-            )
-        with viewer:
-            viewer.clear_output(wait=True)
-            display(
-                HTML(
-                    build_live_ready_scene_html(
-                        audio_path=audio_path,
-                        source_label=selected_source_label(),
-                        is_mic=state["source"] == "mic",
-                    )
-                )
-            )
-            display(live_start_button)
-
     def run_selected_source(force: bool = False) -> None:
         if state.get("running"):
             with output:
                 print("A demo run is already active. Wait for it to finish or stop the stream.")
-            return
-        if state["mode"] == "live" and not force:
-            render_live_ready_viewer()
             return
         if state["source"] == "upload" and not upload.value:
             with output:
@@ -462,6 +416,7 @@ def display_full_demo_ui(repo_root: Path = REPO_ROOT) -> None:
                 )
                 render_summary(summary, output)
                 with viewer:
+                    viewer.clear_output(wait=True)
                     display(
                         HTML(
                             build_viewer_scene_html(
@@ -476,77 +431,53 @@ def display_full_demo_ui(repo_root: Path = REPO_ROOT) -> None:
                     )
                 state["last_summary"] = summary
 
-            elif state["source"] != "mic":
+            elif state["mode"] == "live":
+                if state["source"] == "mic":
+                    render_summary(
+                        {
+                            "mode": "live",
+                            "source": "mic",
+                            "status": "browser_mic_showcase_ready",
+                        },
+                        output,
+                    )
+                    with viewer:
+                        viewer.clear_output(wait=True)
+                        display(HTML(build_live_mic_showcase_html()))
+                    state["last_summary"] = {"mode": "live", "source": "mic"}
+                    return
+
                 audio_path = current_audio_path()
                 if audio_path is None:
                     raise RuntimeError("Live replay requires sample audio or uploaded audio.")
-                config = RealtimeAudioFileDemoConfig(
+                if str(state["source"]) not in SAMPLE_CACHED_TRANSCRIPTS:
+                    with viewer:
+                        viewer.clear_output(wait=True)
+                        display(
+                            HTML(
+                                build_processing_scene_html(
+                                    title="Preparing live replay",
+                                    detail="Running OpenAI Whisper turbo before replaying the stream.",
+                                )
+                            )
+                        )
+                summary, captions, actions = run_live_showcase_pipeline(
+                    session=session,
                     audio_path=audio_path,
-                    chunk_seconds=FULL_DEMO_CHUNK_SECONDS,
-                    dynamic_chunking=FULL_DEMO_DYNAMIC_CHUNKING,
-                    min_chunk_seconds=FULL_DEMO_MIN_CHUNK_SECONDS,
-                    pause_seconds=FULL_DEMO_PAUSE_SECONDS,
-                    silence_threshold=FULL_DEMO_SILENCE_THRESHOLD,
-                    max_chunks=None,
-                    language=FULL_DEMO_LANGUAGE,
+                    source_key=str(state["source"]),
                     asr_provider=FULL_DEMO_ASR_PROVIDER,
                     asr_model=FULL_DEMO_ASR_MODEL,
-                    install_asr_deps=False,
-                    output_dir=session.output_dir / "live_replay",
-                    catalog_path=session.catalog_path,
-                    promotions_path=session.promotions_path,
                 )
-                with viewer:
-                    summary = run_realtime_audio_file_demo(config)
-                captions = load_cached_transcript(Path(summary["captions_json"]))
-                actions = _load_actions(Path(summary["actions_json"]))
                 render_summary(summary, output)
                 with viewer:
+                    viewer.clear_output(wait=True)
                     display(
                         HTML(
-                            build_viewer_scene_html(
+                            build_live_simulation_scene_html(
                                 audio_path=audio_path,
                                 captions=captions,
                                 actions=actions,
-                                mode_label="Live replay mode",
-                                title="Real-time gated file stream result",
-                                show_audio_controls=False,
-                            )
-                        )
-                    )
-                state["last_summary"] = summary
-
-            else:
-                config = LiveMicDemoConfig(
-                    chunk_seconds=FULL_DEMO_CHUNK_SECONDS,
-                    min_chunk_seconds=FULL_DEMO_MIN_CHUNK_SECONDS,
-                    pause_seconds=FULL_DEMO_PAUSE_SECONDS,
-                    silence_threshold=FULL_DEMO_SILENCE_THRESHOLD,
-                    max_chunks=None,
-                    language=FULL_DEMO_LANGUAGE,
-                    asr_provider=FULL_DEMO_ASR_PROVIDER,
-                    asr_model=FULL_DEMO_ASR_MODEL,
-                    install_asr_deps=False,
-                    show_debug_panel=True,
-                    continuous_recording=True,
-                    output_dir=session.output_dir / "live_mic",
-                    catalog_path=session.catalog_path,
-                    promotions_path=session.promotions_path,
-                )
-                with viewer:
-                    summary = run_colab_live_mic_demo(config)
-                captions = load_cached_transcript(Path(summary["captions_json"]))
-                actions = _load_actions(Path(summary["actions_json"]))
-                render_summary(summary, output)
-                with viewer:
-                    display(
-                        HTML(
-                            build_viewer_scene_html(
-                                audio_path=None,
-                                captions=captions,
-                                actions=actions,
-                                mode_label="Live mic mode",
-                                title="Microphone live-stream result",
+                                source_label=selected_source_label(),
                             )
                         )
                     )
@@ -556,7 +487,6 @@ def display_full_demo_ui(repo_root: Path = REPO_ROOT) -> None:
             with output:
                 print(f"Demo failed: {exc}")
 
-    live_start_button.on_click(lambda _button: run_selected_source(force=True))
     refresh_button.on_click(refresh_catalog)
 
     form_ui = build_catalog_forms(session, refresh_catalog)
@@ -608,7 +538,9 @@ def display_full_demo_ui(repo_root: Path = REPO_ROOT) -> None:
         ]
     )
     display(app)
-    refresh_selection_ui(render_idle=True)
+    refresh_selection_ui(render_idle=False)
+    with viewer:
+        viewer.clear_output(wait=True)
     refresh_catalog()
 
 
@@ -776,6 +708,48 @@ def run_recording_pipeline(
     )
 
 
+def run_live_showcase_pipeline(
+    session: FullDemoSession,
+    audio_path: Path,
+    source_key: str,
+    asr_provider: str,
+    asr_model: str,
+) -> Tuple[Dict[str, Any], CaptionResult, List[CommerceAction]]:
+    cached_path = SAMPLE_CACHED_TRANSCRIPTS.get(source_key)
+    cached_actions_path = SAMPLE_CACHED_ACTIONS.get(source_key)
+    if cached_path and cached_actions_path and cached_path.exists() and cached_actions_path.exists():
+        captions = load_cached_transcript(cached_path)
+        actions = _load_actions(cached_actions_path)
+        source_mode = "live_cache"
+    else:
+        _, captions, actions = run_recording_pipeline(
+            session=session,
+            audio_path=audio_path,
+            source_key=source_key,
+            asr_provider=asr_provider,
+            asr_model=asr_model,
+            use_cached=False,
+            dynamic_chunking=FULL_DEMO_DYNAMIC_CHUNKING,
+            chunk_seconds=FULL_DEMO_CHUNK_SECONDS,
+            pause_seconds=FULL_DEMO_PAUSE_SECONDS,
+            silence_threshold=FULL_DEMO_SILENCE_THRESHOLD,
+        )
+        source_mode = asr_provider
+
+    return (
+        {
+            "mode": "live_showcase",
+            "source_mode": source_mode,
+            "audio_path": str(audio_path),
+            "caption_count": len(captions.segments),
+            "action_count": len(actions),
+            "metrics": caption_metrics(captions),
+        },
+        captions,
+        actions,
+    )
+
+
 def build_catalog_forms(session: FullDemoSession, refresh_callback: Any) -> Any:
     import ipywidgets as widgets  # type: ignore
 
@@ -919,32 +893,209 @@ def build_live_ready_scene_html(
 
 def build_processing_scene_html(title: str, detail: str) -> str:
     return f"""
-<div class="lc-viewer">
+<div class="lc-processing-panel">
+  <div>
+    <div class="lc-panel-title">{html.escape(title)}</div>
+    <div class="lc-muted">{html.escape(detail)}</div>
+  </div>
+  <div class="lc-progress-bar"><div></div></div>
+  <div class="lc-processing-steps">
+    <span>ASR</span>
+    <span>Caption validation</span>
+    <span>Commerce action extraction</span>
+  </div>
+</div>
+"""
+
+
+def build_live_simulation_scene_html(
+    audio_path: Path,
+    captions: CaptionResult,
+    actions: Sequence[CommerceAction],
+    source_label: str,
+) -> str:
+    segments = [segment.to_dict() for segment in captions.segments]
+    action_payload = [action.to_dict() for action in actions]
+    return f"""
+<div class="lc-viewer" id="live-sim-{abs(hash((str(audio_path), source_label)))}">
   <div class="lc-video">
+    <audio preload="metadata" src="{_audio_data_uri(audio_path)}" style="display:none;"></audio>
     <div class="lc-video-art">
-      <div class="lc-video-badge">Processing</div>
+      <div class="lc-video-badge">Live</div>
       <div class="lc-host-frame">
         <div class="lc-host-head"></div>
         <div class="lc-host-body"></div>
       </div>
-      <div class="lc-video-caption">{html.escape(detail)}</div>
+      <div class="lc-video-caption" data-role="caption">Press Start to begin live replay.</div>
     </div>
-    <div class="lc-progress-bar"><div></div></div>
+    <div class="lc-progress-bar"><div data-role="progress"></div></div>
   </div>
   <div class="lc-action-rail">
-    <div class="lc-panel-title">{html.escape(title)}</div>
-    <div class="lc-source-detail">
-      Captions and commerce actions will appear here when processing completes.
+    <div class="lc-panel-title">Live stream showcase</div>
+    <div class="lc-stats">
+      <span>{html.escape(source_label)}</span>
+      <span data-role="clock">0.00s</span>
+    </div>
+    <div class="lc-live-controls">
+      <button data-role="start">Start / Continue</button>
+      <button data-role="stop" disabled>Stop input</button>
+    </div>
+    <div class="lc-source-detail" data-role="detail">
+      Audio is released by stream time. Stop pauses new input while visible actions remain.
+    </div>
+    <div data-role="actions" class="lc-live-actions"></div>
+  </div>
+</div>
+<script>
+(() => {{
+  const root = document.currentScript.previousElementSibling;
+  const audio = root.querySelector("audio");
+  const captions = {json.dumps(segments, ensure_ascii=False)};
+  const actions = {json.dumps(action_payload, ensure_ascii=False)};
+  const startButton = root.querySelector('[data-role="start"]');
+  const stopButton = root.querySelector('[data-role="stop"]');
+  const captionEl = root.querySelector('[data-role="caption"]');
+  const actionsEl = root.querySelector('[data-role="actions"]');
+  const progressEl = root.querySelector('[data-role="progress"]');
+  const clockEl = root.querySelector('[data-role="clock"]');
+  const detailEl = root.querySelector('[data-role="detail"]');
+  const renderAction = (action) => {{
+    const title = action.display_payload?.title || action.action_type;
+    const skus = (action.skus || []).join(" + ");
+    return `<div class="lc-action-card"><div class="lc-action-type">${{action.action_type}}</div><strong>${{title}}</strong><div>${{skus}}</div><small>${{Number(action.timestamp || 0).toFixed(2)}}s</small></div>`;
+  }};
+  const render = () => {{
+    const t = audio.currentTime || 0;
+    const total = Number.isFinite(audio.duration) ? audio.duration : 0;
+    clockEl.textContent = `${{t.toFixed(2)}}s`;
+    if (total) progressEl.style.width = `${{Math.max(0, Math.min(100, (t / total) * 100))}}%`;
+    const current = captions.find(item => t >= item.start && t <= item.end) || captions.filter(item => item.end <= t).slice(-1)[0];
+    captionEl.textContent = current ? current.text : "Waiting for caption...";
+    const visible = actions.filter(item => item.timestamp <= t);
+    actionsEl.innerHTML = (visible.length ? visible : actions.slice(0, 2)).slice(-6).map(renderAction).join("");
+  }};
+  startButton.onclick = () => {{
+    audio.play();
+    startButton.disabled = true;
+    stopButton.disabled = false;
+    detailEl.textContent = "Streaming audio into caption/action timeline.";
+    render();
+  }};
+  stopButton.onclick = () => {{
+    audio.pause();
+    startButton.disabled = false;
+    stopButton.disabled = true;
+    detailEl.textContent = "Input stopped. Already displayed actions remain on screen.";
+    render();
+  }};
+  audio.addEventListener("timeupdate", render);
+  audio.addEventListener("ended", () => {{
+    startButton.disabled = false;
+    stopButton.disabled = true;
+    detailEl.textContent = "Live replay finished.";
+    render();
+  }});
+  render();
+}})();
+</script>
+"""
+
+
+def build_live_mic_showcase_html() -> str:
+    return """
+<div class="lc-viewer" id="full-demo-live-mic">
+  <div class="lc-video">
+    <div class="lc-video-art">
+      <div class="lc-video-badge">Live mic</div>
+      <div class="lc-host-frame">
+        <div class="lc-host-head"></div>
+        <div class="lc-host-body"></div>
+      </div>
+      <div class="lc-video-caption" data-role="caption">Press Start to begin receiving microphone input.</div>
+    </div>
+    <div class="lc-progress-bar"><div data-role="meter"></div></div>
+  </div>
+  <div class="lc-action-rail">
+    <div class="lc-panel-title">Live microphone showcase</div>
+    <div class="lc-live-controls">
+      <button data-role="start">Start mic</button>
+      <button data-role="stop" disabled>Stop input</button>
+    </div>
+    <div class="lc-stats">
+      <span data-role="elapsed">0.00s</span>
+      <span data-role="state">ready</span>
+    </div>
+    <div class="lc-source-detail" data-role="detail">
+      Browser mic stream preview. Stop closes the input.
     </div>
     <div class="lc-live-actions">
       <div class="lc-action-card">
-        <div class="lc-action-type">ASR</div>
-        <strong>Working...</strong>
-        <div class="lc-muted">This can take a moment for uploaded audio or mic recordings.</div>
+        <div class="lc-action-type">MIC</div>
+        <strong>Waiting for speech</strong>
+        <div class="lc-muted">Use this panel to verify the live-mode UX without blocking the notebook kernel.</div>
       </div>
     </div>
   </div>
 </div>
+<script>
+(() => {
+  const root = document.currentScript.previousElementSibling;
+  const get = role => root.querySelector(`[data-role="${role}"]`);
+  let stream = null;
+  let audioContext = null;
+  let analyser = null;
+  let timer = null;
+  let startedAt = 0;
+  const cleanup = () => {
+    if (timer) clearInterval(timer);
+    timer = null;
+    if (stream) stream.getTracks().forEach(track => track.stop());
+    stream = null;
+    if (audioContext) audioContext.close();
+    audioContext = null;
+    analyser = null;
+  };
+  const tick = () => {
+    if (!analyser) return;
+    const waveform = new Uint8Array(analyser.fftSize);
+    analyser.getByteTimeDomainData(waveform);
+    let sumSquares = 0;
+    for (const value of waveform) {
+      const centered = (value - 128) / 128;
+      sumSquares += centered * centered;
+    }
+    const rms = Math.sqrt(sumSquares / waveform.length);
+    const elapsed = (performance.now() - startedAt) / 1000;
+    get("elapsed").textContent = `${elapsed.toFixed(2)}s`;
+    get("meter").style.width = `${Math.max(2, Math.min(100, rms * 700))}%`;
+    const speaking = rms >= 0.015;
+    get("state").textContent = speaking ? "speech" : "silence";
+    get("caption").textContent = speaking ? "Receiving microphone speech..." : "Listening for speech pause...";
+  };
+  get("start").onclick = async () => {
+    cleanup();
+    stream = await navigator.mediaDevices.getUserMedia({audio: true});
+    audioContext = new (window.AudioContext || window.webkitAudioContext)();
+    const source = audioContext.createMediaStreamSource(stream);
+    analyser = audioContext.createAnalyser();
+    analyser.fftSize = 1024;
+    source.connect(analyser);
+    startedAt = performance.now();
+    get("start").disabled = true;
+    get("stop").disabled = false;
+    get("detail").textContent = "Mic input is open.";
+    timer = setInterval(tick, 100);
+  };
+  get("stop").onclick = () => {
+    cleanup();
+    get("start").disabled = false;
+    get("stop").disabled = true;
+    get("state").textContent = "stopped";
+    get("caption").textContent = "Input stopped.";
+    get("detail").textContent = "Mic input closed.";
+  };
+})();
+</script>
 """
 
 
@@ -1362,6 +1513,9 @@ def _style_block() -> str:
 .lc-mic-controls button[data-role=start],.lc-mic-controls button[data-role=confirm]{background:#b42318;color:#fff}
 .lc-mic-controls button[data-role=stop],.lc-mic-controls button[data-role=cancel]{background:#f2f4f7;color:#344054}
 .lc-mic-controls button:disabled{opacity:.5;cursor:not-allowed}
+.lc-processing-panel{border:1px solid #d0d5dd;border-radius:8px;background:#fff;color:#111827;padding:18px;box-shadow:0 8px 24px rgba(16,24,40,.06)}
+.lc-processing-steps{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px}
+.lc-processing-steps span{border-radius:999px;background:#f2f4f7;color:#344054;padding:5px 9px;font-size:12px;font-weight:700}
 .lc-viewer{display:grid;grid-template-columns:minmax(0,1.25fr) minmax(260px,.75fr);gap:14px;border:1px solid #d0d5dd;border-radius:8px;padding:14px;background:#fff;margin-bottom:12px;box-shadow:0 8px 24px rgba(16,24,40,.06)}
 .lc-video-art{height:390px;background:#171717;border-radius:8px;position:relative;overflow:hidden}
 .lc-video-art:before{content:"";position:absolute;inset:0;background:linear-gradient(145deg,#171717 0%,#7f1d1d 54%,#0f766e 100%)}
@@ -1374,12 +1528,18 @@ def _style_block() -> str:
 .lc-audio{width:100%;margin-top:10px}
 .lc-no-audio{border:1px solid #d0d5dd;border-radius:8px;padding:10px;margin-top:10px;color:#667085;background:#f9fafb}
 .lc-progress-bar{height:10px;border-radius:999px;overflow:hidden;background:#f2f4f7;margin-top:10px}
-.lc-progress-bar div{height:100%;width:42%;background:#b42318;animation:lc-progress-sweep 1.15s ease-in-out infinite}
+.lc-progress-bar div{height:100%;width:0%;background:#b42318}
+.lc-processing-panel .lc-progress-bar div{width:42%;animation:lc-progress-sweep 1.15s ease-in-out infinite}
 @keyframes lc-progress-sweep{0%{transform:translateX(-120%)}100%{transform:translateX(260%)}}
 .lc-action-rail{min-height:390px;color:#111827}
 .lc-stats{display:flex;gap:8px;margin-bottom:10px}
 .lc-stats span{background:#f2f4f7;border-radius:999px;padding:4px 9px;font-size:12px;color:#344054}
 .lc-live-actions{display:flex;flex-direction:column;gap:8px}
+.lc-live-controls{display:flex;gap:8px;margin:10px 0}
+.lc-live-controls button{border:0;border-radius:8px;padding:10px 13px;font-weight:800;cursor:pointer}
+.lc-live-controls button[data-role=start]{background:#b42318;color:#fff}
+.lc-live-controls button[data-role=stop]{background:#f2f4f7;color:#344054}
+.lc-live-controls button:disabled{opacity:.5;cursor:not-allowed}
 .lc-action-card,.lc-product-card,.lc-promo-card{border:1px solid #d0d5dd;border-radius:8px;padding:11px;background:#fff;color:#111827;box-shadow:0 2px 8px rgba(16,24,40,.04)}
 .lc-action-type{font-size:11px;color:#b42318;font-weight:800;margin-bottom:4px}
 .lc-catalog-grid{display:grid;grid-template-columns:1.35fr .9fr;gap:14px}
