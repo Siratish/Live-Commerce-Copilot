@@ -103,9 +103,6 @@ class BrowserAudioPlaybackGate:
         self.poll_seconds = poll_seconds
         self.widget_id = widget_id or f"realtime-audio-file-{uuid.uuid4().hex}"
         self._installed = False
-        callback_suffix = self.widget_id.replace("-", "_")
-        self._start_callback = f"live_commerce_file_start_{callback_suffix}"
-        self._stop_callback = f"live_commerce_file_stop_{callback_suffix}"
         self._start_event = threading.Event()
         self._stop_event = threading.Event()
         self._started_at: Optional[float] = None
@@ -119,58 +116,39 @@ class BrowserAudioPlaybackGate:
         except ImportError as exc:
             raise RuntimeError("Browser audio playback gating requires Google Colab.") from exc
 
-        output.register_callback(self._start_callback, self._handle_start)
-        output.register_callback(self._stop_callback, self._handle_stop)
         display(HTML(_build_realtime_audio_file_html(self.audio_path, self.windows, self.widget_id)))
-        script = _build_realtime_audio_file_js(
-            self.widget_id,
-            self.poll_seconds,
-            self._start_callback,
-            self._stop_callback,
-        )
+        script = _build_realtime_audio_file_js(self.widget_id, self.poll_seconds)
         try:
             output.eval_js(script)
         except Exception:
             display(Javascript(script))
         self._installed = True
 
-    def _handle_start(self, *_args: Any) -> Dict[str, Any]:
-        if self._started_at is None:
-            self._started_at = time.monotonic()
-        self._start_event.set()
-        return self.status()
-
-    def _handle_stop(self, *_args: Any) -> Dict[str, Any]:
-        self._mark_stopped()
-        return self.status()
-
     def wait_for_start(self) -> Dict[str, Any]:
-        self._start_event.wait()
-        return self.status()
+        from google.colab import output  # type: ignore
+
+        return output.eval_js(
+            _build_realtime_audio_file_api_call_js(self.widget_id, "waitForStart")
+        )
 
     def wait_until(self, target_seconds: float) -> Dict[str, Any]:
-        if self._started_at is None:
-            self.wait_for_start()
-        assert self._started_at is not None
-        while not self._stop_event.is_set():
-            current_time = time.monotonic() - self._started_at
-            if current_time >= float(target_seconds):
-                return self.status()
-            time.sleep(min(self.poll_seconds, max(0.01, float(target_seconds) - current_time)))
-        return self.status()
+        from google.colab import output  # type: ignore
+
+        return output.eval_js(
+            _build_realtime_audio_file_api_call_js(
+                self.widget_id,
+                "waitUntil",
+                [float(target_seconds)],
+            )
+        )
 
     def status(self) -> Dict[str, Any]:
-        current_time = 0.0
-        if self._started_at is not None:
-            current_time = max(0.0, time.monotonic() - self._started_at)
-        duration = max((window.end for window in self.windows), default=0.0)
-        return {
-            "currentTime": min(current_time, duration) if duration else current_time,
-            "duration": duration,
-            "paused": self._started_at is None or self._stop_event.is_set(),
-            "ended": bool(duration and current_time >= duration),
-            "stopped": self._stop_event.is_set(),
-        }
+        from google.colab import output  # type: ignore
+
+        status = output.eval_js(
+            _build_realtime_audio_file_api_call_js(self.widget_id, "getStatus")
+        )
+        return status if isinstance(status, dict) else {}
 
     def stop(self) -> None:
         self._mark_stopped()
@@ -264,16 +242,28 @@ def run_realtime_audio_file_demo(
             "chunk_dir": str(chunk_dir),
         }
 
-    gate.publish(
-        {
-            "state": "loading_asr",
-            "status": f"loading_{config.asr_provider}_{config.asr_model}",
-            "totalChunks": len(audio_windows),
-            "processedChunks": 0,
-            "queueDepth": 0,
-        }
-    )
-    asr_engine = asr or _build_file_stream_asr(config)
+    if asr is None:
+        gate.publish(
+            {
+                "state": "loading_asr",
+                "status": f"loading_{config.asr_provider}_{config.asr_model}",
+                "totalChunks": len(audio_windows),
+                "processedChunks": 0,
+                "queueDepth": 0,
+            }
+        )
+        asr_engine = _build_file_stream_asr(config)
+    else:
+        asr_engine = asr
+        gate.publish(
+            {
+                "state": "asr_ready",
+                "status": "asr_model_ready",
+                "totalChunks": len(audio_windows),
+                "processedChunks": 0,
+                "queueDepth": 0,
+            }
+        )
     catalog = load_product_catalog(config.catalog_path)
     promotions = load_promotions(config.promotions_path)
 

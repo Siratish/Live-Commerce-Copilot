@@ -31,6 +31,7 @@ from src.utils.live_mic import (
 )
 from src.utils.realtime_audio_file import (
     RealtimeAudioFileDemoConfig,
+    _build_file_stream_asr,
     run_realtime_audio_file_demo,
 )
 
@@ -113,6 +114,9 @@ class FullDemoPlaybackGate:
         self._stopped = threading.Event()
         self._started_at: Optional[float] = None
         self._duration = max((window.end for window in self.windows), default=0.0)
+        self._state = "ready"
+        self._detail = "press_start"
+        self._ticker_started = False
         self.status_html = widgets.HTML()
         self.detail_html = widgets.HTML()
         self.start_button = widgets.Button(
@@ -163,6 +167,7 @@ class FullDemoPlaybackGate:
         self.start_button.disabled = True
         self.stop_button.disabled = False
         self.publish({"state": "playing", "status": "stream_started"})
+        self._start_ticker()
         self._eval_audio_js("play")
 
     def stop(self) -> None:
@@ -202,8 +207,8 @@ class FullDemoPlaybackGate:
         }
 
     def publish(self, payload: Dict[str, Any]) -> None:
+        self._state = str(payload.get("state") or self._state or "waiting")
         status = self.status()
-        state = str(payload.get("state") or "waiting")
         detail_parts = [str(payload.get("status") or "waiting")]
         if payload.get("chunkIndex"):
             detail_parts.append(
@@ -217,17 +222,38 @@ class FullDemoPlaybackGate:
             detail_parts.append(f"{payload['captionCount']} captions")
         if payload.get("actionCount") is not None:
             detail_parts.append(f"{payload['actionCount']} actions")
+        self._detail = " | ".join(detail_parts)
+        self._render_status()
+
+    def _render_status(self) -> None:
+        status = self.status()
         self.status_html.value = (
             '<div class="lc-selected-summary">'
-            f"<strong>{html.escape(state)}</strong> · "
+            f"<strong>{html.escape(self._state)}</strong> · "
             f"{status['currentTime']:.2f}s / {self._duration:.2f}s"
             "</div>"
         )
         self.detail_html.value = (
             '<div class="lc-source-detail">'
-            + html.escape(" | ".join(detail_parts))
+            + html.escape(self._detail)
             + "</div>"
         )
+
+    def _start_ticker(self) -> None:
+        if self._ticker_started:
+            return
+        self._ticker_started = True
+
+        def tick() -> None:
+            while not self._stopped.is_set():
+                self._render_status()
+                status = self.status()
+                if status.get("ended"):
+                    break
+                time.sleep(max(0.1, self.poll_seconds))
+            self._render_status()
+
+        threading.Thread(target=tick, daemon=True).start()
 
     def _showcase_html(self) -> str:
         return f"""
@@ -818,9 +844,26 @@ def display_full_demo_ui(repo_root: Path = REPO_ROOT) -> None:
 
         def worker() -> None:
             try:
+                asr_engine = None
+                if not cancel_event.is_set():
+                    if playback_gate is not None:
+                        playback_gate.publish(
+                            {
+                                "state": "loading_asr",
+                                "status": (
+                                    "Preparing OpenAI Whisper turbo. "
+                                    "First load can take a moment."
+                                ),
+                                "totalChunks": len(windows),
+                                "processedChunks": 0,
+                                "queueDepth": 0,
+                            }
+                        )
+                    asr_engine = _build_file_stream_asr(config)
                 summary = run_realtime_audio_file_demo(
                     config,
                     playback_gate=playback_gate,
+                    asr=asr_engine,
                     windows=windows,
                     cancel_event=cancel_event,
                 )
