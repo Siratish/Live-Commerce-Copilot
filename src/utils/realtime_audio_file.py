@@ -101,8 +101,11 @@ class BrowserAudioPlaybackGate:
         self.windows = list(windows)
         self.poll_seconds = poll_seconds
         self.widget_id = widget_id or f"realtime-audio-file-{uuid.uuid4().hex}"
+        self._installed = False
 
     def install(self) -> None:
+        if self._installed:
+            return
         try:
             from IPython.display import HTML, Javascript, display  # type: ignore
             from google.colab import output  # type: ignore  # noqa: F401
@@ -111,6 +114,7 @@ class BrowserAudioPlaybackGate:
 
         display(HTML(_build_realtime_audio_file_html(self.audio_path, self.windows, self.widget_id)))
         display(Javascript(_build_realtime_audio_file_js(self.widget_id, self.poll_seconds)))
+        self._installed = True
 
     def wait_for_start(self) -> Dict[str, Any]:
         from google.colab import output  # type: ignore

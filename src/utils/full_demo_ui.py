@@ -14,6 +14,7 @@ from src.ai.captioning import (
     CaptioningEngine,
     CaptioningSettings,
     caption_metrics,
+    iter_audio_windows,
     load_cached_transcript,
     write_caption_outputs,
 )
@@ -21,8 +22,13 @@ from src.ai.commerce_actions import generate_commerce_actions, save_commerce_act
 from src.data.catalog import load_product_catalog, load_promotions
 from src.schemas import CommerceAction, ProductCatalogItem, Promotion
 from src.utils.action_timeline import save_action_timeline_html
-from src.utils.live_mic import LiveMicDemoConfig, run_colab_live_mic_demo
+from src.utils.live_mic import (
+    LiveMicDemoConfig,
+    install_colab_live_mic_debug_panel,
+    run_colab_live_mic_demo,
+)
 from src.utils.realtime_audio_file import (
+    BrowserAudioPlaybackGate,
     RealtimeAudioFileDemoConfig,
     run_realtime_audio_file_demo,
 )
@@ -312,14 +318,14 @@ def display_full_demo_ui(repo_root: Path = REPO_ROOT) -> None:
 
     def set_mode(value: str) -> None:
         state["mode"] = value
-        refresh_selection_ui()
+        refresh_selection_ui(render_idle=value != "live")
         if state.get("source") is not None:
             if state["source"] != "upload" or upload.value:
                 run_selected_source(force=True)
 
     def set_source(value: str) -> None:
         state["source"] = value
-        refresh_selection_ui()
+        refresh_selection_ui(render_idle=state["mode"] != "live")
         if value != "upload":
             run_selected_source(force=True)
 
@@ -476,6 +482,17 @@ def display_full_demo_ui(repo_root: Path = REPO_ROOT) -> None:
             catalog_path=session.catalog_path,
             promotions_path=session.promotions_path,
         )
+        windows = list(
+            iter_audio_windows(
+                audio_path,
+                int(FULL_DEMO_CHUNK_SECONDS),
+                dynamic_chunking=FULL_DEMO_DYNAMIC_CHUNKING,
+                min_chunk_seconds=FULL_DEMO_MIN_CHUNK_SECONDS,
+                pause_seconds=FULL_DEMO_PAUSE_SECONDS,
+                silence_threshold=FULL_DEMO_SILENCE_THRESHOLD,
+            )
+        )
+        playback_gate: Optional[BrowserAudioPlaybackGate] = None
 
         with output:
             output.clear_output(wait=True)
@@ -483,12 +500,26 @@ def display_full_demo_ui(repo_root: Path = REPO_ROOT) -> None:
                 f"Live stream panel is starting for {selected_source_label()}. "
                 "Use Start/Stop inside the showcase."
             )
+        with viewer:
+            viewer.clear_output(wait=True)
+            try:
+                playback_gate = BrowserAudioPlaybackGate(
+                    audio_path=audio_path,
+                    windows=windows,
+                    poll_seconds=config.playback_poll_seconds,
+                )
+                playback_gate.install()
+            except Exception as exc:
+                print(f"Browser live controls unavailable, using wall-clock replay: {exc}")
+                playback_gate = None
 
         def worker() -> None:
             try:
-                with viewer:
-                    viewer.clear_output(wait=True)
-                    summary = run_realtime_audio_file_demo(config)
+                summary = run_realtime_audio_file_demo(
+                    config,
+                    playback_gate=playback_gate,
+                    windows=windows,
+                )
                 state["last_summary"] = summary
                 render_summary(summary, output)
             except Exception as exc:
@@ -510,7 +541,7 @@ def display_full_demo_ui(repo_root: Path = REPO_ROOT) -> None:
             asr_provider=FULL_DEMO_ASR_PROVIDER,
             asr_model=FULL_DEMO_ASR_MODEL,
             install_asr_deps=False,
-            show_debug_panel=True,
+            show_debug_panel=False,
             continuous_recording=True,
             output_dir=session.output_dir / "live_mic",
             catalog_path=session.catalog_path,
@@ -520,12 +551,16 @@ def display_full_demo_ui(repo_root: Path = REPO_ROOT) -> None:
         with output:
             output.clear_output(wait=True)
             print("Live mic panel is starting. Use Start/Stop inside the showcase.")
+        with viewer:
+            viewer.clear_output(wait=True)
+            try:
+                install_colab_live_mic_debug_panel()
+            except Exception as exc:
+                print(f"Browser mic controls unavailable: {exc}")
 
         def worker() -> None:
             try:
-                with viewer:
-                    viewer.clear_output(wait=True)
-                    summary = run_colab_live_mic_demo(config)
+                summary = run_colab_live_mic_demo(config)
                 state["last_summary"] = summary
                 render_summary(summary, output)
             except Exception as exc:
@@ -954,197 +989,6 @@ def build_processing_scene_html(title: str, detail: str) -> str:
     <span>Commerce action extraction</span>
   </div>
 </div>
-"""
-
-
-def build_live_simulation_scene_html(
-    audio_path: Path,
-    captions: CaptionResult,
-    actions: Sequence[CommerceAction],
-    source_label: str,
-) -> str:
-    segments = [segment.to_dict() for segment in captions.segments]
-    action_payload = [action.to_dict() for action in actions]
-    return f"""
-<div class="lc-viewer" id="live-sim-{abs(hash((str(audio_path), source_label)))}">
-  <div class="lc-video">
-    <audio preload="metadata" src="{_audio_data_uri(audio_path)}" style="display:none;"></audio>
-    <div class="lc-video-art">
-      <div class="lc-video-badge">Live</div>
-      <div class="lc-host-frame">
-        <div class="lc-host-head"></div>
-        <div class="lc-host-body"></div>
-      </div>
-      <div class="lc-video-caption" data-role="caption">Press Start to begin live replay.</div>
-    </div>
-    <div class="lc-progress-bar"><div data-role="progress"></div></div>
-  </div>
-  <div class="lc-action-rail">
-    <div class="lc-panel-title">Live stream showcase</div>
-    <div class="lc-stats">
-      <span>{html.escape(source_label)}</span>
-      <span data-role="clock">0.00s</span>
-    </div>
-    <div class="lc-live-controls">
-      <button data-role="start">Start / Continue</button>
-      <button data-role="stop" disabled>Stop input</button>
-    </div>
-    <div class="lc-source-detail" data-role="detail">
-      Audio is released by stream time. Stop pauses new input while visible actions remain.
-    </div>
-    <div data-role="actions" class="lc-live-actions"></div>
-  </div>
-</div>
-<script>
-(() => {{
-  const root = document.currentScript.previousElementSibling;
-  const audio = root.querySelector("audio");
-  const captions = {json.dumps(segments, ensure_ascii=False)};
-  const actions = {json.dumps(action_payload, ensure_ascii=False)};
-  const startButton = root.querySelector('[data-role="start"]');
-  const stopButton = root.querySelector('[data-role="stop"]');
-  const captionEl = root.querySelector('[data-role="caption"]');
-  const actionsEl = root.querySelector('[data-role="actions"]');
-  const progressEl = root.querySelector('[data-role="progress"]');
-  const clockEl = root.querySelector('[data-role="clock"]');
-  const detailEl = root.querySelector('[data-role="detail"]');
-  const renderAction = (action) => {{
-    const title = action.display_payload?.title || action.action_type;
-    const skus = (action.skus || []).join(" + ");
-    return `<div class="lc-action-card"><div class="lc-action-type">${{action.action_type}}</div><strong>${{title}}</strong><div>${{skus}}</div><small>${{Number(action.timestamp || 0).toFixed(2)}}s</small></div>`;
-  }};
-  const render = () => {{
-    const t = audio.currentTime || 0;
-    const total = Number.isFinite(audio.duration) ? audio.duration : 0;
-    clockEl.textContent = `${{t.toFixed(2)}}s`;
-    if (total) progressEl.style.width = `${{Math.max(0, Math.min(100, (t / total) * 100))}}%`;
-    const current = captions.find(item => t >= item.start && t <= item.end) || captions.filter(item => item.end <= t).slice(-1)[0];
-    captionEl.textContent = current ? current.text : "Waiting for caption...";
-    const visible = actions.filter(item => item.timestamp <= t);
-    actionsEl.innerHTML = (visible.length ? visible : actions.slice(0, 2)).slice(-6).map(renderAction).join("");
-  }};
-  startButton.onclick = () => {{
-    audio.play();
-    startButton.disabled = true;
-    stopButton.disabled = false;
-    detailEl.textContent = "Streaming audio into caption/action timeline.";
-    render();
-  }};
-  stopButton.onclick = () => {{
-    audio.pause();
-    startButton.disabled = false;
-    stopButton.disabled = true;
-    detailEl.textContent = "Input stopped. Already displayed actions remain on screen.";
-    render();
-  }};
-  audio.addEventListener("timeupdate", render);
-  audio.addEventListener("ended", () => {{
-    startButton.disabled = false;
-    stopButton.disabled = true;
-    detailEl.textContent = "Live replay finished.";
-    render();
-  }});
-  render();
-}})();
-</script>
-"""
-
-
-def build_live_mic_showcase_html() -> str:
-    return """
-<div class="lc-viewer" id="full-demo-live-mic">
-  <div class="lc-video">
-    <div class="lc-video-art">
-      <div class="lc-video-badge">Live mic</div>
-      <div class="lc-host-frame">
-        <div class="lc-host-head"></div>
-        <div class="lc-host-body"></div>
-      </div>
-      <div class="lc-video-caption" data-role="caption">Press Start to begin receiving microphone input.</div>
-    </div>
-    <div class="lc-progress-bar"><div data-role="meter"></div></div>
-  </div>
-  <div class="lc-action-rail">
-    <div class="lc-panel-title">Live microphone showcase</div>
-    <div class="lc-live-controls">
-      <button data-role="start">Start mic</button>
-      <button data-role="stop" disabled>Stop input</button>
-    </div>
-    <div class="lc-stats">
-      <span data-role="elapsed">0.00s</span>
-      <span data-role="state">ready</span>
-    </div>
-    <div class="lc-source-detail" data-role="detail">
-      Browser mic stream preview. Stop closes the input.
-    </div>
-    <div class="lc-live-actions">
-      <div class="lc-action-card">
-        <div class="lc-action-type">MIC</div>
-        <strong>Waiting for speech</strong>
-        <div class="lc-muted">Use this panel to verify the live-mode UX without blocking the notebook kernel.</div>
-      </div>
-    </div>
-  </div>
-</div>
-<script>
-(() => {
-  const root = document.currentScript.previousElementSibling;
-  const get = role => root.querySelector(`[data-role="${role}"]`);
-  let stream = null;
-  let audioContext = null;
-  let analyser = null;
-  let timer = null;
-  let startedAt = 0;
-  const cleanup = () => {
-    if (timer) clearInterval(timer);
-    timer = null;
-    if (stream) stream.getTracks().forEach(track => track.stop());
-    stream = null;
-    if (audioContext) audioContext.close();
-    audioContext = null;
-    analyser = null;
-  };
-  const tick = () => {
-    if (!analyser) return;
-    const waveform = new Uint8Array(analyser.fftSize);
-    analyser.getByteTimeDomainData(waveform);
-    let sumSquares = 0;
-    for (const value of waveform) {
-      const centered = (value - 128) / 128;
-      sumSquares += centered * centered;
-    }
-    const rms = Math.sqrt(sumSquares / waveform.length);
-    const elapsed = (performance.now() - startedAt) / 1000;
-    get("elapsed").textContent = `${elapsed.toFixed(2)}s`;
-    get("meter").style.width = `${Math.max(2, Math.min(100, rms * 700))}%`;
-    const speaking = rms >= 0.015;
-    get("state").textContent = speaking ? "speech" : "silence";
-    get("caption").textContent = speaking ? "Receiving microphone speech..." : "Listening for speech pause...";
-  };
-  get("start").onclick = async () => {
-    cleanup();
-    stream = await navigator.mediaDevices.getUserMedia({audio: true});
-    audioContext = new (window.AudioContext || window.webkitAudioContext)();
-    const source = audioContext.createMediaStreamSource(stream);
-    analyser = audioContext.createAnalyser();
-    analyser.fftSize = 1024;
-    source.connect(analyser);
-    startedAt = performance.now();
-    get("start").disabled = true;
-    get("stop").disabled = false;
-    get("detail").textContent = "Mic input is open.";
-    timer = setInterval(tick, 100);
-  };
-  get("stop").onclick = () => {
-    cleanup();
-    get("start").disabled = false;
-    get("stop").disabled = true;
-    get("state").textContent = "stopped";
-    get("caption").textContent = "Input stopped.";
-    get("detail").textContent = "Mic input closed.";
-  };
-})();
-</script>
 """
 
 

@@ -543,8 +543,8 @@ def _install_colab_mic_recorder() -> None:
                     queueDepth: (state.bufferQueue || []).length
                   };
                 }
-                state.stopRequested = false;
-                state.startRequested = false;
+                state.stopRequested = Boolean(state.stopRequested);
+                state.startRequested = Boolean(state.startRequested);
                 state.bufferQueue = [];
                 state.bufferWaiters = [];
                 state.bufferDone = false;
@@ -862,22 +862,21 @@ def install_colab_live_mic_debug_panel() -> None:
             """
             (() => {
               const state = window.liveCommerceMic = window.liveCommerceMic || {};
-              state.updateDebug = function(payload) {
+              const latestRoot = () => {
                 const roots = document.querySelectorAll('#live-commerce-mic-debug');
-                const root = roots.length ? roots[roots.length - 1] : null;
+                return roots.length ? roots[roots.length - 1] : null;
+              };
+              const bindControls = () => {
+                const root = latestRoot();
                 if (!root) return;
                 const get = id => root.querySelector(`#${id}`);
-                const rms = Number(payload.rms || 0);
-                const threshold = Number(payload.threshold || 0);
-                const status = payload.status || 'waiting';
-                const isSpeech = status === 'speech';
-                const isSilence = status === 'silence';
                 const startButton = get('mic-debug-start');
                 const stopButton = get('mic-debug-stop');
                 if (startButton && !startButton.dataset.bound) {
                   startButton.dataset.bound = '1';
                   startButton.onclick = () => {
                     state.startRequested = true;
+                    state.stopRequested = false;
                     if (typeof state.resolveStart === 'function') {
                       state.resolveStart(true);
                       state.resolveStart = null;
@@ -896,6 +895,17 @@ def install_colab_live_mic_debug_panel() -> None:
                     if (startButton) startButton.disabled = true;
                   };
                 }
+              };
+              state.updateDebug = function(payload) {
+                const root = latestRoot();
+                if (!root) return;
+                const get = id => root.querySelector(`#${id}`);
+                bindControls();
+                const rms = Number(payload.rms || 0);
+                const threshold = Number(payload.threshold || 0);
+                const status = payload.status || 'waiting';
+                const isSpeech = status === 'speech';
+                const isSilence = status === 'silence';
                 const meterPct = Math.max(0, Math.min(100, (rms / Math.max(threshold || 0.001, 0.001)) * 70));
                 get('mic-debug-chunk').textContent = payload.chunkIndex ? String(payload.chunkIndex) : '-';
                 get('mic-debug-status').textContent = status;
@@ -928,6 +938,7 @@ def install_colab_live_mic_debug_panel() -> None:
                 state.latestDebug = Object.assign({}, state.latestDebug || {}, payload || {});
                 if (typeof state.updateDebug === 'function') state.updateDebug(state.latestDebug);
               };
+              bindControls();
               if (state.latestDebug) state.updateDebug(state.latestDebug);
             })();
             """
