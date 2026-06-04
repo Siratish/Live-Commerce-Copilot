@@ -23,8 +23,8 @@ from src.data.catalog import load_product_catalog, load_promotions
 from src.schemas import CommerceAction, ProductCatalogItem, Promotion
 from src.utils.action_timeline import save_action_timeline_html
 from src.utils.live_mic import (
+    BrowserMicChunkSource,
     LiveMicDemoConfig,
-    install_colab_live_mic_debug_panel,
     run_colab_live_mic_demo,
 )
 from src.utils.realtime_audio_file import (
@@ -106,6 +106,9 @@ def display_full_demo_ui(repo_root: Path = REPO_ROOT) -> None:
         "mode": "recording",
         "source": None,
         "running": False,
+        "run_id": 0,
+        "active_stop": None,
+        "active_cancel": None,
     }
 
     display(HTML(_style_block()))
@@ -316,14 +319,37 @@ def display_full_demo_ui(repo_root: Path = REPO_ROOT) -> None:
         if render_idle:
             render_idle_viewer()
 
+    def interrupt_active_run(clear_viewer: bool = False) -> None:
+        state["run_id"] = int(state.get("run_id") or 0) + 1
+        cancel_event = state.get("active_cancel")
+        if cancel_event is not None:
+            try:
+                cancel_event.set()
+            except Exception:
+                pass
+        stop = state.get("active_stop")
+        if callable(stop):
+            try:
+                stop()
+            except Exception:
+                pass
+        state["active_stop"] = None
+        state["active_cancel"] = None
+        state["running"] = False
+        if clear_viewer:
+            with viewer:
+                viewer.clear_output(wait=True)
+
     def set_mode(value: str) -> None:
+        mode_changed = value != state["mode"]
+        if value != state["mode"]:
+            interrupt_active_run(clear_viewer=True)
+            state["source"] = None
         state["mode"] = value
-        refresh_selection_ui(render_idle=value != "live")
-        if state.get("source") is not None:
-            if state["source"] != "upload" or upload.value:
-                run_selected_source(force=True)
+        refresh_selection_ui(render_idle=(not mode_changed and value != "live"))
 
     def set_source(value: str) -> None:
+        interrupt_active_run(clear_viewer=True)
         state["source"] = value
         refresh_selection_ui(render_idle=state["mode"] != "live")
         if value != "upload":
@@ -336,6 +362,7 @@ def display_full_demo_ui(repo_root: Path = REPO_ROOT) -> None:
 
     def on_upload_change(change: Dict[str, Any]) -> None:
         if change.get("new"):
+            interrupt_active_run(clear_viewer=True)
             state["source"] = "upload"
             refresh_selection_ui(render_idle=False)
             run_selected_source(force=True)
@@ -364,23 +391,28 @@ def display_full_demo_ui(repo_root: Path = REPO_ROOT) -> None:
 
     def run_selected_source(force: bool = False) -> None:
         if state.get("running"):
-            with output:
-                print("A demo run is already active. Wait for it to finish or stop the stream.")
-            return
+            interrupt_active_run(clear_viewer=True)
         if state["source"] == "upload" and not upload.value:
             with output:
                 output.clear_output(wait=True)
                 print("Select an audio file to start.")
             return
+        state["run_id"] = int(state.get("run_id") or 0) + 1
+        run_id = int(state["run_id"])
+        cancel_event = threading.Event()
+        state["active_cancel"] = cancel_event
         state["running"] = True
         async_started = False
         try:
-            async_started = run_demo()
+            async_started = run_demo(run_id, cancel_event)
         finally:
             if not async_started:
-                state["running"] = False
+                if int(state.get("run_id") or 0) == run_id:
+                    state["running"] = False
+                    state["active_stop"] = None
+                    state["active_cancel"] = None
 
-    def run_demo() -> bool:
+    def run_demo(run_id: int, cancel_event: threading.Event) -> bool:
         with output:
             output.clear_output(wait=True)
             print(
@@ -448,13 +480,13 @@ def display_full_demo_ui(repo_root: Path = REPO_ROOT) -> None:
 
             elif state["mode"] == "live":
                 if state["source"] == "mic":
-                    start_live_mic_worker()
+                    start_live_mic_worker(run_id, cancel_event)
                     return True
 
                 audio_path = current_audio_path()
                 if audio_path is None:
                     raise RuntimeError("Live replay requires sample audio or uploaded audio.")
-                start_live_file_worker(audio_path)
+                start_live_file_worker(audio_path, run_id, cancel_event)
                 return True
 
         except Exception as exc:
@@ -464,7 +496,11 @@ def display_full_demo_ui(repo_root: Path = REPO_ROOT) -> None:
 
         return False
 
-    def start_live_file_worker(audio_path: Path) -> None:
+    def start_live_file_worker(
+        audio_path: Path,
+        run_id: int,
+        cancel_event: threading.Event,
+    ) -> None:
         source_key = str(state["source"])
         config = RealtimeAudioFileDemoConfig(
             audio_path=audio_path,
@@ -509,6 +545,7 @@ def display_full_demo_ui(repo_root: Path = REPO_ROOT) -> None:
                     poll_seconds=config.playback_poll_seconds,
                 )
                 playback_gate.install()
+                state["active_stop"] = playback_gate.stop
             except Exception as exc:
                 print(f"Browser live controls unavailable, using wall-clock replay: {exc}")
                 playback_gate = None
@@ -519,18 +556,24 @@ def display_full_demo_ui(repo_root: Path = REPO_ROOT) -> None:
                     config,
                     playback_gate=playback_gate,
                     windows=windows,
+                    cancel_event=cancel_event,
                 )
-                state["last_summary"] = summary
-                render_summary(summary, output)
+                if int(state.get("run_id") or 0) == run_id:
+                    state["last_summary"] = summary
+                    render_summary(summary, output)
             except Exception as exc:
-                with output:
-                    print(f"Live file demo failed: {exc}")
+                if int(state.get("run_id") or 0) == run_id:
+                    with output:
+                        print(f"Live file demo failed: {exc}")
             finally:
-                state["running"] = False
+                if int(state.get("run_id") or 0) == run_id:
+                    state["running"] = False
+                    state["active_stop"] = None
+                    state["active_cancel"] = None
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def start_live_mic_worker() -> None:
+    def start_live_mic_worker(run_id: int, cancel_event: threading.Event) -> None:
         config = LiveMicDemoConfig(
             chunk_seconds=FULL_DEMO_CHUNK_SECONDS,
             min_chunk_seconds=FULL_DEMO_MIN_CHUNK_SECONDS,
@@ -554,20 +597,32 @@ def display_full_demo_ui(repo_root: Path = REPO_ROOT) -> None:
         with viewer:
             viewer.clear_output(wait=True)
             try:
-                install_colab_live_mic_debug_panel()
+                mic_source = BrowserMicChunkSource(config)
+                mic_source.install()
+                state["active_stop"] = mic_source.stop
             except Exception as exc:
                 print(f"Browser mic controls unavailable: {exc}")
+                mic_source = None
 
         def worker() -> None:
             try:
-                summary = run_colab_live_mic_demo(config)
-                state["last_summary"] = summary
-                render_summary(summary, output)
+                summary = run_colab_live_mic_demo(
+                    config,
+                    chunk_source=mic_source,
+                    cancel_event=cancel_event,
+                )
+                if int(state.get("run_id") or 0) == run_id:
+                    state["last_summary"] = summary
+                    render_summary(summary, output)
             except Exception as exc:
-                with output:
-                    print(f"Live mic demo failed: {exc}")
+                if int(state.get("run_id") or 0) == run_id:
+                    with output:
+                        print(f"Live mic demo failed: {exc}")
             finally:
-                state["running"] = False
+                if int(state.get("run_id") or 0) == run_id:
+                    state["running"] = False
+                    state["active_stop"] = None
+                    state["active_cancel"] = None
 
         threading.Thread(target=worker, daemon=True).start()
 

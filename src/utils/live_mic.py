@@ -5,8 +5,11 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 import base64
 import json
+import queue
 import subprocess
 import sys
+import threading
+import uuid
 
 from src.ai.captioning import (
     CaptioningUnavailable,
@@ -42,6 +45,96 @@ class LiveMicDemoConfig:
     output_dir: Path = Path("outputs/live_mic")
     catalog_path: Path = Path("data/demo/product_catalog.csv")
     promotions_path: Path = Path("data/demo/promotions.csv")
+
+
+class BrowserMicChunkSource:
+    """Callback-driven Colab mic source for background ASR workers."""
+
+    def __init__(self, config: LiveMicDemoConfig) -> None:
+        self.config = config
+        suffix = uuid.uuid4().hex
+        self.chunk_callback = f"live_commerce_mic_chunk_{suffix}"
+        self.done_callback = f"live_commerce_mic_done_{suffix}"
+        self.error_callback = f"live_commerce_mic_error_{suffix}"
+        self.start_callback = f"live_commerce_mic_start_{suffix}"
+        self.stop_callback = f"live_commerce_mic_stop_{suffix}"
+        self._chunks: "queue.Queue[Optional[Dict[str, Any]]]" = queue.Queue()
+        self._started = threading.Event()
+        self._done = threading.Event()
+        self._stopped = threading.Event()
+        self.error: Optional[str] = None
+
+    def install(self) -> None:
+        from google.colab import output  # type: ignore
+
+        output.register_callback(self.chunk_callback, self._handle_chunk)
+        output.register_callback(self.done_callback, self._handle_done)
+        output.register_callback(self.error_callback, self._handle_error)
+        output.register_callback(self.start_callback, self._handle_start)
+        output.register_callback(self.stop_callback, self._handle_stop)
+        install_colab_live_mic_debug_panel(
+            config=self.config,
+            callbacks={
+                "chunk": self.chunk_callback,
+                "done": self.done_callback,
+                "error": self.error_callback,
+                "start": self.start_callback,
+                "stop": self.stop_callback,
+            },
+        )
+
+    def _handle_start(self, *_args: Any) -> Dict[str, Any]:
+        self._started.set()
+        return {"started": True}
+
+    def _handle_stop(self, *_args: Any) -> Dict[str, Any]:
+        self.stop(call_browser=False)
+        return {"stopped": True}
+
+    def _handle_chunk(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        if not self._stopped.is_set() and isinstance(payload, dict):
+            self._chunks.put(payload)
+        return {"queueDepth": self._chunks.qsize()}
+
+    def _handle_done(self, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        self._done.set()
+        self._chunks.put(None)
+        return {"done": True, "queueDepth": self._chunks.qsize()}
+
+    def _handle_error(self, payload: Any = None) -> Dict[str, Any]:
+        if isinstance(payload, dict):
+            self.error = str(payload.get("error") or payload.get("status") or payload)
+        else:
+            self.error = str(payload)
+        self._done.set()
+        self._chunks.put(None)
+        return {"error": self.error}
+
+    def wait_for_start(self, timeout: Optional[float] = None) -> bool:
+        return self._started.wait(timeout)
+
+    def pop_chunk(self, timeout: float) -> Optional[Dict[str, Any]]:
+        try:
+            return self._chunks.get(timeout=max(0.05, float(timeout)))
+        except queue.Empty:
+            return None
+
+    def is_done(self) -> bool:
+        return self._done.is_set() or self._stopped.is_set()
+
+    def stop(self, call_browser: bool = True) -> None:
+        self._stopped.set()
+        self._done.set()
+        self._started.set()
+        self._chunks.put(None)
+        if not call_browser:
+            return
+        try:
+            from google.colab import output  # type: ignore
+
+            output.eval_js("window.liveCommerceMic && window.liveCommerceMic.stop()")
+        except Exception:
+            pass
 
 
 class _OpenAIWhisperLiveASR:
@@ -167,10 +260,14 @@ class _TyphoonWhisperLiveASR:
 def run_colab_live_mic_demo(
     config: LiveMicDemoConfig = LiveMicDemoConfig(),
     decision_provider: Optional[CommerceDecisionProvider] = None,
+    chunk_source: Optional[BrowserMicChunkSource] = None,
+    cancel_event: Optional[threading.Event] = None,
 ) -> Dict[str, Any]:
     """Record browser mic chunks in Colab, transcribe them, and emit actions."""
     _install_asr_dependencies(config.install_asr_deps)
-    if config.show_debug_panel:
+    if chunk_source is not None:
+        pass
+    elif config.show_debug_panel:
         install_colab_live_mic_debug_panel()
     else:
         _install_colab_mic_recorder()
@@ -190,20 +287,36 @@ def run_colab_live_mic_demo(
 
     try:
         if config.continuous_recording:
-            _start_colab_mic_buffer(config)
+            if chunk_source is None:
+                _start_colab_mic_buffer(config)
+            else:
+                chunk_source.wait_for_start()
             while not _chunk_limit_reached(processed_chunks, config.max_chunks):
-                payload = _pop_colab_mic_buffered_chunk(config.poll_interval_seconds)
+                if cancel_event and cancel_event.is_set():
+                    break
+                if chunk_source is None:
+                    payload = _pop_colab_mic_buffered_chunk(config.poll_interval_seconds)
+                else:
+                    payload = chunk_source.pop_chunk(config.poll_interval_seconds)
                 if payload is None:
-                    buffer_status = _get_colab_mic_buffer_status()
-                    if buffer_status.get("error"):
-                        raise RuntimeError(
-                            f"browser mic buffered recorder failed: {buffer_status['error']}"
-                        )
-                    if (
-                        buffer_status.get("done")
-                        and int(buffer_status.get("queueDepth") or 0) == 0
-                    ):
-                        break
+                    if chunk_source is None:
+                        buffer_status = _get_colab_mic_buffer_status()
+                        if buffer_status.get("error"):
+                            raise RuntimeError(
+                                f"browser mic buffered recorder failed: {buffer_status['error']}"
+                            )
+                        if (
+                            buffer_status.get("done")
+                            and int(buffer_status.get("queueDepth") or 0) == 0
+                        ):
+                            break
+                    else:
+                        if chunk_source.error:
+                            raise RuntimeError(
+                                f"browser mic buffered recorder failed: {chunk_source.error}"
+                            )
+                        if chunk_source.is_done():
+                            break
                     continue
 
                 processed_chunks += 1
@@ -225,6 +338,8 @@ def run_colab_live_mic_demo(
                     live_segments=live_segments,
                     elapsed_seconds=elapsed_seconds,
                 )
+                if cancel_event and cancel_event.is_set():
+                    break
                 _publish_colab_mic_debug(
                     {
                         "chunkIndex": chunk_number,
@@ -280,7 +395,10 @@ def run_colab_live_mic_demo(
                     }
                 )
     finally:
-        _stop_colab_mic()
+        if chunk_source is None:
+            _stop_colab_mic()
+        elif cancel_event and cancel_event.is_set():
+            chunk_source.stop()
 
     if config.continuous_recording:
         buffer_status = _get_colab_mic_buffer_status() or buffer_status
@@ -409,6 +527,14 @@ def _install_colab_mic_recorder() -> None:
                   state.updateDebug(state.latestDebug);
                 }
               };
+              window.liveCommerceMic.emitCallback = function(callbackName, payload) {
+                if (!callbackName || !window.google || !google.colab || !google.colab.kernel) return;
+                try {
+                  google.colab.kernel.invokeFunction(callbackName, [payload || {}], {});
+                } catch (error) {
+                  console.warn('Live mic callback failed', error);
+                }
+              };
               window.liveCommerceMic.recordChunk = async function(
                 maxMilliseconds,
                 minMilliseconds,
@@ -533,7 +659,10 @@ def _install_colab_mic_recorder() -> None:
                 silenceMilliseconds,
                 silenceThreshold,
                 maxChunks,
-                maxQueueChunks
+                maxQueueChunks,
+                chunkCallbackName,
+                doneCallbackName,
+                errorCallbackName
               ) {
                 const state = window.liveCommerceMic;
                 if (state.bufferLoopActive) {
@@ -591,14 +720,16 @@ def _install_colab_mic_recorder() -> None:
                     queueDepth: (state.bufferQueue || []).length,
                     droppedChunks: state.droppedChunks || 0
                   });
-                  if (wakeWaiter(enriched)) return;
-                  if (state.bufferQueue.length >= state.maxQueueChunks) {
-                    state.bufferQueue.shift();
-                    state.droppedChunks += 1;
+                  if (!wakeWaiter(enriched)) {
+                    if (state.bufferQueue.length >= state.maxQueueChunks) {
+                      state.bufferQueue.shift();
+                      state.droppedChunks += 1;
+                    }
+                    enriched.queueDepth = state.bufferQueue.length + 1;
+                    enriched.droppedChunks = state.droppedChunks;
+                    state.bufferQueue.push(enriched);
                   }
-                  enriched.queueDepth = state.bufferQueue.length + 1;
-                  enriched.droppedChunks = state.droppedChunks;
-                  state.bufferQueue.push(enriched);
+                  state.emitCallback(chunkCallbackName, enriched);
                 };
                 state.publishDebug({
                   chunkIndex: 1,
@@ -643,6 +774,7 @@ def _install_colab_mic_recorder() -> None:
                       queueDepth: state.bufferQueue.length,
                       droppedChunks: state.droppedChunks
                     });
+                    state.emitCallback(errorCallbackName, {error: state.bufferError});
                   } finally {
                     state.bufferLoopActive = false;
                     state.bufferDone = true;
@@ -651,6 +783,11 @@ def _install_colab_mic_recorder() -> None:
                     }
                     state.publishDebug({
                       state: 'recording_done',
+                      status: state.bufferError || 'done',
+                      queueDepth: state.bufferQueue.length,
+                      droppedChunks: state.droppedChunks
+                    });
+                    state.emitCallback(doneCallbackName, {
                       status: state.bufferError || 'done',
                       queueDepth: state.bufferQueue.length,
                       droppedChunks: state.droppedChunks
@@ -791,7 +928,10 @@ def _get_colab_mic_buffer_status() -> Dict[str, Any]:
         return {}
 
 
-def install_colab_live_mic_debug_panel() -> None:
+def install_colab_live_mic_debug_panel(
+    config: Optional[LiveMicDemoConfig] = None,
+    callbacks: Optional[Dict[str, str]] = None,
+) -> None:
     """Display a Colab mic debug panel that updates while live chunks record."""
     _install_colab_mic_recorder()
     try:
@@ -799,6 +939,18 @@ def install_colab_live_mic_debug_panel() -> None:
         from google.colab import output  # type: ignore  # noqa: F401
     except ImportError as exc:
         raise RuntimeError("Live mic debug panel requires Google Colab browser APIs.") from exc
+    callback_config = None
+    if config is not None and callbacks:
+        callback_config = {
+            "maxMilliseconds": max(500, int(float(config.chunk_seconds) * 1000)),
+            "minMilliseconds": max(200, int(float(config.min_chunk_seconds) * 1000)),
+            "silenceMilliseconds": max(100, int(float(config.pause_seconds) * 1000)),
+            "silenceThreshold": float(config.silence_threshold),
+            "maxChunks": None
+            if config.max_chunks is None
+            else max(1, int(config.max_chunks)),
+            "maxQueueChunks": max(1, int(config.max_queue_chunks)),
+        }
 
     display(
         HTML(
@@ -859,9 +1011,16 @@ def install_colab_live_mic_debug_panel() -> None:
     )
     display(
         Javascript(
-            """
+            "window.liveCommerceMicPanelConfig = "
+            + json.dumps(callback_config)
+            + ";\nwindow.liveCommerceMicPanelCallbacks = "
+            + json.dumps(callbacks or {})
+            + ";\n"
+            + """
             (() => {
               const state = window.liveCommerceMic = window.liveCommerceMic || {};
+              const callbackConfig = window.liveCommerceMicPanelConfig || null;
+              const callbackNames = window.liveCommerceMicPanelCallbacks || {};
               const latestRoot = () => {
                 const roots = document.querySelectorAll('#live-commerce-mic-debug');
                 return roots.length ? roots[roots.length - 1] : null;
@@ -877,6 +1036,9 @@ def install_colab_live_mic_debug_panel() -> None:
                   startButton.onclick = () => {
                     state.startRequested = true;
                     state.stopRequested = false;
+                    if (callbackConfig && typeof state.emitCallback === 'function') {
+                      state.emitCallback(callbackNames.start, {started: true});
+                    }
                     if (typeof state.resolveStart === 'function') {
                       state.resolveStart(true);
                       state.resolveStart = null;
@@ -884,12 +1046,38 @@ def install_colab_live_mic_debug_panel() -> None:
                     startButton.textContent = 'Recording...';
                     startButton.disabled = true;
                     if (stopButton) stopButton.disabled = false;
+                    if (callbackConfig && typeof state.startBufferedRecording === 'function') {
+                      state.startBufferedRecording(
+                        callbackConfig.maxMilliseconds,
+                        callbackConfig.minMilliseconds,
+                        callbackConfig.silenceMilliseconds,
+                        callbackConfig.silenceThreshold,
+                        callbackConfig.maxChunks,
+                        callbackConfig.maxQueueChunks,
+                        callbackNames.chunk,
+                        callbackNames.done,
+                        callbackNames.error
+                      ).then(result => {
+                        if (!result || !result.started) {
+                          const reason = result && result.reason ? result.reason : 'not_started';
+                          state.publishDebug({state: 'error', status: reason});
+                          state.emitCallback(callbackNames.error, {error: reason});
+                        }
+                      }).catch(error => {
+                        const message = error && (error.message || String(error));
+                        state.publishDebug({state: 'error', status: message});
+                        state.emitCallback(callbackNames.error, {error: message});
+                      });
+                    }
                   };
                 }
                 if (stopButton && !stopButton.dataset.bound) {
                   stopButton.dataset.bound = '1';
                   stopButton.onclick = () => {
                     if (typeof state.stop === 'function') state.stop();
+                    if (typeof state.emitCallback === 'function') {
+                      state.emitCallback(callbackNames.stop, {stopped: true});
+                    }
                     stopButton.textContent = 'Stopping...';
                     stopButton.disabled = true;
                     if (startButton) startButton.disabled = true;

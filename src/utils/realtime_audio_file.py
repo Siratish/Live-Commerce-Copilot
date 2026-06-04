@@ -8,6 +8,7 @@ import json
 import mimetypes
 import subprocess
 import sys
+import threading
 import time
 import uuid
 import wave
@@ -102,6 +103,12 @@ class BrowserAudioPlaybackGate:
         self.poll_seconds = poll_seconds
         self.widget_id = widget_id or f"realtime-audio-file-{uuid.uuid4().hex}"
         self._installed = False
+        callback_suffix = self.widget_id.replace("-", "_")
+        self._start_callback = f"live_commerce_file_start_{callback_suffix}"
+        self._stop_callback = f"live_commerce_file_stop_{callback_suffix}"
+        self._start_event = threading.Event()
+        self._stop_event = threading.Event()
+        self._started_at: Optional[float] = None
 
     def install(self) -> None:
         if self._installed:
@@ -112,39 +119,75 @@ class BrowserAudioPlaybackGate:
         except ImportError as exc:
             raise RuntimeError("Browser audio playback gating requires Google Colab.") from exc
 
+        output.register_callback(self._start_callback, self._handle_start)
+        output.register_callback(self._stop_callback, self._handle_stop)
         display(HTML(_build_realtime_audio_file_html(self.audio_path, self.windows, self.widget_id)))
-        script = _build_realtime_audio_file_js(self.widget_id, self.poll_seconds)
+        script = _build_realtime_audio_file_js(
+            self.widget_id,
+            self.poll_seconds,
+            self._start_callback,
+            self._stop_callback,
+        )
         try:
             output.eval_js(script)
         except Exception:
             display(Javascript(script))
         self._installed = True
 
-    def wait_for_start(self) -> Dict[str, Any]:
-        from google.colab import output  # type: ignore
+    def _handle_start(self, *_args: Any) -> Dict[str, Any]:
+        if self._started_at is None:
+            self._started_at = time.monotonic()
+        self._start_event.set()
+        return self.status()
 
-        return output.eval_js(
-            _build_realtime_audio_file_api_call_js(self.widget_id, "waitForStart")
-        )
+    def _handle_stop(self, *_args: Any) -> Dict[str, Any]:
+        self._mark_stopped()
+        return self.status()
+
+    def wait_for_start(self) -> Dict[str, Any]:
+        self._start_event.wait()
+        return self.status()
 
     def wait_until(self, target_seconds: float) -> Dict[str, Any]:
-        from google.colab import output  # type: ignore
-
-        return output.eval_js(
-            _build_realtime_audio_file_api_call_js(
-                self.widget_id,
-                "waitUntil",
-                [float(target_seconds)],
-            )
-        )
+        if self._started_at is None:
+            self.wait_for_start()
+        assert self._started_at is not None
+        while not self._stop_event.is_set():
+            current_time = time.monotonic() - self._started_at
+            if current_time >= float(target_seconds):
+                return self.status()
+            time.sleep(min(self.poll_seconds, max(0.01, float(target_seconds) - current_time)))
+        return self.status()
 
     def status(self) -> Dict[str, Any]:
-        from google.colab import output  # type: ignore
+        current_time = 0.0
+        if self._started_at is not None:
+            current_time = max(0.0, time.monotonic() - self._started_at)
+        duration = max((window.end for window in self.windows), default=0.0)
+        return {
+            "currentTime": min(current_time, duration) if duration else current_time,
+            "duration": duration,
+            "paused": self._started_at is None or self._stop_event.is_set(),
+            "ended": bool(duration and current_time >= duration),
+            "stopped": self._stop_event.is_set(),
+        }
 
-        status = output.eval_js(
-            _build_realtime_audio_file_api_call_js(self.widget_id, "getStatus")
-        )
-        return status if isinstance(status, dict) else {}
+    def stop(self) -> None:
+        self._mark_stopped()
+        try:
+            from google.colab import output  # type: ignore
+
+            output.eval_js(
+                "window.realtimeAudioFileDemo && window.realtimeAudioFileDemo"
+                f"[{json.dumps(self.widget_id)}] && window.realtimeAudioFileDemo"
+                f"[{json.dumps(self.widget_id)}].stop()"
+            )
+        except Exception:
+            pass
+
+    def _mark_stopped(self) -> None:
+        self._stop_event.set()
+        self._start_event.set()
 
     def publish(self, payload: Dict[str, Any]) -> None:
         try:
@@ -164,6 +207,7 @@ def run_realtime_audio_file_demo(
     playback_gate: Optional[Any] = None,
     asr: Optional[Any] = None,
     windows: Optional[Sequence[AudioWindow]] = None,
+    cancel_event: Optional[threading.Event] = None,
 ) -> Dict[str, Any]:
     """Replay an audio file as a live stream and process chunks after playback passes them."""
     if config.install_asr_deps:
@@ -207,7 +251,7 @@ def run_realtime_audio_file_demo(
         }
     )
     start_status = gate.wait_for_start()
-    if start_status.get("stopped"):
+    if start_status.get("stopped") or (cancel_event and cancel_event.is_set()):
         return {
             "caption_count": 0,
             "action_count": 0,
@@ -231,6 +275,9 @@ def run_realtime_audio_file_demo(
     stopped_by_user = False
 
     for index, window in enumerate(audio_windows, start=1):
+        if cancel_event and cancel_event.is_set():
+            stopped_by_user = True
+            break
         gate.publish(
             {
                 "state": "waiting_for_playback",
@@ -243,7 +290,10 @@ def run_realtime_audio_file_demo(
         )
         status = gate.wait_until(window.end)
         current_time = float(status.get("currentTime") or window.end)
-        if status.get("stopped") and current_time < window.end:
+        if (
+            status.get("stopped")
+            or (cancel_event and cancel_event.is_set())
+        ) and current_time < window.end:
             stopped_by_user = True
             gate.publish(
                 {
@@ -280,6 +330,9 @@ def run_realtime_audio_file_demo(
             offset_seconds=window.start,
             fallback_duration_seconds=window.end - window.start,
         )
+        if cancel_event and cancel_event.is_set():
+            stopped_by_user = True
+            break
         processed_chunks += 1
         live_segments = repair_caption_timestamps([*live_segments, *new_segments])
         caption_result = CaptionResult(
@@ -464,12 +517,27 @@ def _build_realtime_audio_file_html(
 """
 
 
-def _build_realtime_audio_file_js(widget_id: str, poll_seconds: float) -> str:
+def _build_realtime_audio_file_js(
+    widget_id: str,
+    poll_seconds: float,
+    start_callback: Optional[str] = None,
+    stop_callback: Optional[str] = None,
+) -> str:
     poll_milliseconds = max(50, int(float(poll_seconds) * 1000))
     return f"""
 (() => {{
   const widgetId = {json.dumps(widget_id)};
   const pollMilliseconds = {poll_milliseconds};
+  const startCallback = {json.dumps(start_callback)};
+  const stopCallback = {json.dumps(stop_callback)};
+  const invokeCallback = (name, payload) => {{
+    if (!name || !window.google || !google.colab || !google.colab.kernel) return;
+    try {{
+      google.colab.kernel.invokeFunction(name, [payload || {{}}], {{}});
+    }} catch (error) {{
+      console.warn("Live callback failed", error);
+    }}
+  }};
   const install = (attempt = 0) => {{
     const root = document.getElementById(widgetId);
     if (!root) {{
@@ -569,6 +637,7 @@ def _build_realtime_audio_file_js(widget_id: str, poll_seconds: float) -> str:
       updateTime();
       scheduleTick();
       resolveStart();
+      invokeCallback(startCallback, getStatus());
     }};
     const stopInput = () => {{
       baseSeconds = streamTime();
@@ -583,6 +652,7 @@ def _build_realtime_audio_file_js(widget_id: str, poll_seconds: float) -> str:
       setDetail("Input stopped. Already released chunks will finish processing.");
       updateTime();
       resolveStart();
+      invokeCallback(stopCallback, getStatus());
     }};
 
     startButton.addEventListener("click", startInput);

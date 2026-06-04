@@ -317,6 +317,7 @@ class CaptioningTests(unittest.TestCase):
 
         self.assertIn("install(attempt + 1)", script)
         self.assertIn("streamTime()", script)
+        self.assertIn("invokeFunction", script)
         self.assertIn("Browser blocked hidden audio playback", script)
         self.assertIn("api[methodName]", api_call)
         self.assertIn("live audio controls were not ready", api_call)
