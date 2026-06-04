@@ -191,7 +191,7 @@ def run_realtime_audio_file_demo(
     gate.publish(
         {
             "state": "waiting",
-            "status": "press_play",
+            "status": "press_start",
             "totalChunks": len(audio_windows),
             "processedChunks": 0,
             "queueDepth": 0,

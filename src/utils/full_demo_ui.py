@@ -117,9 +117,14 @@ def display_full_demo_ui(repo_root: Path = REPO_ROOT) -> None:
     upload = widgets.FileUpload(
         accept="audio/*",
         multiple=False,
-        description="Select audio",
-        layout=widgets.Layout(width="220px"),
+        description="Upload audio",
+        layout=widgets.Layout(width="100%"),
     )
+    try:
+        upload.icon = "upload"
+    except Exception:
+        pass
+    upload.add_class("lc-upload-widget")
     refresh_button = widgets.Button(
         description="Refresh Catalog",
         icon="refresh",
@@ -131,6 +136,12 @@ def display_full_demo_ui(repo_root: Path = REPO_ROOT) -> None:
     catalog_output = widgets.Output()
     source_detail = widgets.VBox()
     selected_summary = widgets.HTML()
+    live_start_button = widgets.Button(
+        description="Start live stream",
+        icon="play",
+        button_style="danger",
+        layout=widgets.Layout(width="190px", height="42px"),
+    )
 
     mode_buttons: Dict[str, Any] = {
         "recording": widgets.Button(
@@ -147,8 +158,8 @@ def display_full_demo_ui(repo_root: Path = REPO_ROOT) -> None:
         ),
     }
     source_buttons: Dict[str, Any] = {}
-    source_cards = [
-        _source_card_widget(
+    sample_cards = [
+        _sample_source_card_widget(
             widgets,
             key="Audio 1 - Beauty",
             title="Audio 1",
@@ -156,7 +167,7 @@ def display_full_demo_ui(repo_root: Path = REPO_ROOT) -> None:
             icon="shopping-bag",
             source_buttons=source_buttons,
         ),
-        _source_card_widget(
+        _sample_source_card_widget(
             widgets,
             key="Audio 2 - Tech",
             title="Audio 2",
@@ -164,23 +175,16 @@ def display_full_demo_ui(repo_root: Path = REPO_ROOT) -> None:
             icon="bolt",
             source_buttons=source_buttons,
         ),
-        _source_card_widget(
-            widgets,
-            key="upload",
-            title="Upload",
-            subtitle="Use your own audio file",
-            icon="upload",
-            source_buttons=source_buttons,
-        ),
-        _source_card_widget(
+    ]
+    mic_tool = _tool_source_card_widget(
             widgets,
             key="mic",
             title="Mic",
-            subtitle="Speak from browser mic",
+            subtitle="Record or stream from browser mic",
             icon="microphone",
             source_buttons=source_buttons,
-        ),
-    ]
+    )
+    upload_tool = _upload_source_card_widget(widgets, upload)
 
     controls = widgets.VBox(
         [
@@ -195,12 +199,17 @@ def display_full_demo_ui(repo_root: Path = REPO_ROOT) -> None:
             ),
             widgets.HTML('<div class="lc-subtitle">Audio source</div>'),
             widgets.GridBox(
-                source_cards,
+                sample_cards,
                 layout=widgets.Layout(
                     grid_template_columns="repeat(2, minmax(0, 1fr))",
-                    grid_gap="10px",
+                    grid_gap="12px",
                     width="100%",
                 ),
+            ),
+            widgets.HTML('<div class="lc-subtitle">Your input</div>'),
+            widgets.VBox(
+                [upload_tool, mic_tool],
+                layout=widgets.Layout(gap="8px", width="100%"),
             ),
             source_detail,
             selected_summary,
@@ -246,6 +255,10 @@ def display_full_demo_ui(repo_root: Path = REPO_ROOT) -> None:
             button.button_style = "danger" if key == state["mode"] else ""
         for key, button in source_buttons.items():
             button.button_style = "danger" if key == state["source"] else ""
+        try:
+            upload.button_style = "danger" if state["source"] == "upload" else ""
+        except Exception:
+            pass
 
         if state.get("source") is None:
             selected_summary.value = (
@@ -266,11 +279,11 @@ def display_full_demo_ui(repo_root: Path = REPO_ROOT) -> None:
                 widgets.HTML(
                     '<div class="lc-upload-panel">'
                     '<div class="lc-source-icon">UP</div>'
-                    '<div><strong>Upload an audio file</strong>'
-                    '<div class="lc-muted">The demo starts automatically after the file is selected.</div>'
+                    '<div><strong>Upload selected</strong>'
+                    '<div class="lc-muted">Choose a file from the upload tool above. '
+                    "Recording starts after selection; live mode prepares stream controls.</div>"
                     "</div></div>"
                 ),
-                upload,
             ]
         elif state["source"] == "mic":
             source_detail.children = [
@@ -306,12 +319,18 @@ def display_full_demo_ui(repo_root: Path = REPO_ROOT) -> None:
         state["mode"] = value
         refresh_selection_ui()
         if state.get("source") is not None:
-            run_selected_source()
+            if state["mode"] == "live":
+                render_live_ready_viewer()
+            elif state["source"] != "upload" or upload.value:
+                run_selected_source(force=True)
 
     def set_source(value: str) -> None:
         state["source"] = value
         refresh_selection_ui()
-        run_selected_source()
+        if state["mode"] == "live":
+            render_live_ready_viewer()
+        elif value != "upload":
+            run_selected_source(force=True)
 
     for key, button in mode_buttons.items():
         button.on_click(lambda _button, key=key: set_mode(key))
@@ -319,8 +338,13 @@ def display_full_demo_ui(repo_root: Path = REPO_ROOT) -> None:
         button.on_click(lambda _button, key=key: set_source(key))
 
     def on_upload_change(change: Dict[str, Any]) -> None:
-        if state.get("source") == "upload" and change.get("new"):
-            run_selected_source()
+        if change.get("new"):
+            state["source"] = "upload"
+            refresh_selection_ui(render_idle=False)
+            if state["mode"] == "live":
+                render_live_ready_viewer()
+            else:
+                run_selected_source(force=True)
 
     upload.observe(on_upload_change, names="value")
 
@@ -344,10 +368,38 @@ def display_full_demo_ui(repo_root: Path = REPO_ROOT) -> None:
                 )
             )
 
-    def run_selected_source() -> None:
+    def render_live_ready_viewer() -> None:
+        audio_path = current_audio_path()
+        live_start_button.description = (
+            "Start live mic" if state["source"] == "mic" else "Start live stream"
+        )
+        live_start_button.icon = "microphone" if state["source"] == "mic" else "play"
+        with output:
+            output.clear_output(wait=True)
+            print(
+                "Live source selected. Use the Start control in the showcase "
+                "to begin processing."
+            )
+        with viewer:
+            viewer.clear_output(wait=True)
+            display(
+                HTML(
+                    build_live_ready_scene_html(
+                        audio_path=audio_path,
+                        source_label=selected_source_label(),
+                        is_mic=state["source"] == "mic",
+                    )
+                )
+            )
+            display(live_start_button)
+
+    def run_selected_source(force: bool = False) -> None:
         if state.get("running"):
             with output:
                 print("A demo run is already active. Wait for it to finish or stop the stream.")
+            return
+        if state["mode"] == "live" and not force:
+            render_live_ready_viewer()
             return
         if state["source"] == "upload" and not upload.value:
             with output:
@@ -382,6 +434,20 @@ def display_full_demo_ui(repo_root: Path = REPO_ROOT) -> None:
                     audio_path = current_audio_path()
                 if audio_path is None:
                     raise RuntimeError("Choose a sample, upload an audio file, or use microphone.")
+                with viewer:
+                    viewer.clear_output(wait=True)
+                    display(
+                        HTML(
+                            build_processing_scene_html(
+                                title="Processing recording",
+                                detail=(
+                                    "Loading cached captions/actions"
+                                    if state["source"] in SAMPLE_AUDIO
+                                    else "Running OpenAI Whisper turbo and commerce actions"
+                                ),
+                            )
+                        )
+                    )
                 summary, captions, actions = run_recording_pipeline(
                     session=session,
                     audio_path=audio_path,
@@ -490,6 +556,7 @@ def display_full_demo_ui(repo_root: Path = REPO_ROOT) -> None:
             with output:
                 print(f"Demo failed: {exc}")
 
+    live_start_button.on_click(lambda _button: run_selected_source(force=True))
     refresh_button.on_click(refresh_catalog)
 
     form_ui = build_catalog_forms(session, refresh_catalog)
@@ -545,7 +612,7 @@ def display_full_demo_ui(repo_root: Path = REPO_ROOT) -> None:
     refresh_catalog()
 
 
-def _source_card_widget(
+def _sample_source_card_widget(
     widgets: Any,
     key: str,
     title: str,
@@ -553,10 +620,15 @@ def _source_card_widget(
     icon: str,
     source_buttons: Dict[str, Any],
 ) -> Any:
-    icon_html = widgets.HTML(
+    thumb_html = widgets.HTML(
         f"""
-        <div class="lc-source-icon-wrap">
-          <span class="fa fa-{html.escape(icon)}"></span>
+        <div class="lc-sample-thumb">
+          <div class="lc-sample-badge"><span class="fa fa-{html.escape(icon)}"></span></div>
+          <div class="lc-sample-host">
+            <div class="lc-sample-head"></div>
+            <div class="lc-sample-body"></div>
+          </div>
+          <div class="lc-sample-strip">{html.escape(subtitle)}</div>
         </div>
         """
     )
@@ -564,19 +636,74 @@ def _source_card_widget(
         description=title,
         icon=icon,
         tooltip=subtitle,
-        layout=widgets.Layout(width="100%", height="38px"),
+        layout=widgets.Layout(width="100%", height="42px"),
     )
     button.add_class("lc-source-button")
     source_buttons[key] = button
     card = widgets.VBox(
         [
-            icon_html,
+            thumb_html,
             button,
             widgets.HTML(f'<div class="lc-source-caption">{html.escape(subtitle)}</div>'),
         ],
         layout=widgets.Layout(width="100%"),
     )
-    card.add_class("lc-source-card")
+    card.add_class("lc-sample-card")
+    return card
+
+
+def _tool_source_card_widget(
+    widgets: Any,
+    key: str,
+    title: str,
+    subtitle: str,
+    icon: str,
+    source_buttons: Dict[str, Any],
+) -> Any:
+    button = widgets.Button(
+        description=title,
+        icon=icon,
+        tooltip=subtitle,
+        layout=widgets.Layout(width="132px", height="40px"),
+    )
+    button.add_class("lc-tool-button")
+    source_buttons[key] = button
+    card = widgets.HBox(
+        [
+            widgets.HTML(
+                f'<div class="lc-tool-icon"><span class="fa fa-{html.escape(icon)}"></span></div>'
+            ),
+            widgets.VBox(
+                [
+                    widgets.HTML(f'<strong class="lc-tool-title">{html.escape(title)}</strong>'),
+                    widgets.HTML(f'<div class="lc-muted">{html.escape(subtitle)}</div>'),
+                ],
+                layout=widgets.Layout(flex="1 1 auto"),
+            ),
+            button,
+        ],
+        layout=widgets.Layout(width="100%", align_items="center"),
+    )
+    card.add_class("lc-tool-card")
+    return card
+
+
+def _upload_source_card_widget(widgets: Any, upload_widget: Any) -> Any:
+    card = widgets.HBox(
+        [
+            widgets.HTML('<div class="lc-tool-icon"><span class="fa fa-upload"></span></div>'),
+            widgets.VBox(
+                [
+                    widgets.HTML('<strong class="lc-tool-title">Upload</strong>'),
+                    widgets.HTML('<div class="lc-muted">Choose a local audio file</div>'),
+                ],
+                layout=widgets.Layout(flex="1 1 auto"),
+            ),
+            widgets.Box([upload_widget], layout=widgets.Layout(width="150px")),
+        ],
+        layout=widgets.Layout(width="100%", align_items="center"),
+    )
+    card.add_class("lc-tool-card")
     return card
 
 
@@ -738,6 +865,84 @@ def build_catalog_scene_html(
   <div>
     <div class="lc-panel-title">Promotions ({len(promotions)})</div>
     <div class="lc-card-grid">{promo_cards}</div>
+  </div>
+</div>
+"""
+
+
+def build_live_ready_scene_html(
+    audio_path: Optional[Path],
+    source_label: str,
+    is_mic: bool = False,
+) -> str:
+    source_note = (
+        "Microphone input will stream into a queue. Stop closes the mic while queued chunks finish."
+        if is_mic
+        else "Audio will be released to ASR by stream time. Stop closes new input while queued chunks finish."
+    )
+    audio_note = (
+        "Browser mic source"
+        if is_mic
+        else f"Prepared source: {html.escape(audio_path.name if audio_path else source_label)}"
+    )
+    return f"""
+<div class="lc-viewer">
+  <div class="lc-video">
+    <div class="lc-video-art">
+      <div class="lc-video-badge">Live ready</div>
+      <div class="lc-host-frame">
+        <div class="lc-host-head"></div>
+        <div class="lc-host-body"></div>
+      </div>
+      <div class="lc-video-caption">Press Start below to begin live ASR and commerce actions.</div>
+    </div>
+    <div class="lc-no-audio">{audio_note}</div>
+  </div>
+  <div class="lc-action-rail">
+    <div class="lc-panel-title">Live stream controls</div>
+    <div class="lc-stats">
+      <span>{html.escape(source_label)}</span>
+      <span>OpenAI Whisper turbo</span>
+    </div>
+    <div class="lc-source-detail">{source_note}</div>
+    <div class="lc-live-actions">
+      <div class="lc-action-card">
+        <div class="lc-action-type">WAITING</div>
+        <strong>Stream is ready</strong>
+        <div class="lc-muted">Start keeps this showcase active while ASR/action chunks are processed.</div>
+      </div>
+    </div>
+  </div>
+</div>
+"""
+
+
+def build_processing_scene_html(title: str, detail: str) -> str:
+    return f"""
+<div class="lc-viewer">
+  <div class="lc-video">
+    <div class="lc-video-art">
+      <div class="lc-video-badge">Processing</div>
+      <div class="lc-host-frame">
+        <div class="lc-host-head"></div>
+        <div class="lc-host-body"></div>
+      </div>
+      <div class="lc-video-caption">{html.escape(detail)}</div>
+    </div>
+    <div class="lc-progress-bar"><div></div></div>
+  </div>
+  <div class="lc-action-rail">
+    <div class="lc-panel-title">{html.escape(title)}</div>
+    <div class="lc-source-detail">
+      Captions and commerce actions will appear here when processing completes.
+    </div>
+    <div class="lc-live-actions">
+      <div class="lc-action-card">
+        <div class="lc-action-type">ASR</div>
+        <strong>Working...</strong>
+        <div class="lc-muted">This can take a moment for uploaded audio or mic recordings.</div>
+      </div>
+    </div>
   </div>
 </div>
 """
@@ -1129,14 +1334,22 @@ def _style_block() -> str:
 .lc-subtitle{font-size:12px;font-weight:800;text-transform:uppercase;color:#6b7280;margin-top:6px}
 .lc-copy{font-size:13px;color:#475467;line-height:1.45;margin-bottom:4px}
 .lc-operator-panel{background:#fff;border:1px solid #d0d5dd;border-radius:8px;padding:14px;box-shadow:0 8px 24px rgba(16,24,40,.06)}
-.lc-source-card{background:#fff;border:1px solid #e5e7eb;border-radius:8px;padding:10px;box-shadow:0 2px 8px rgba(16,24,40,.04)}
+.lc-sample-card{background:#fff;border:1px solid #d0d5dd;border-radius:8px;padding:10px;box-shadow:0 2px 8px rgba(16,24,40,.04)}
+.lc-tool-card{background:#fff;border:1px solid #e5e7eb;border-radius:8px;padding:10px 12px;box-shadow:0 2px 8px rgba(16,24,40,.04);gap:10px}
 .lc-form-panel{background:#fff;border:1px solid #d0d5dd;border-radius:8px;padding:10px}
 .lc-defaults,.lc-source-detail,.lc-selected-summary{border:1px solid #eaecf0;border-radius:8px;background:#f9fafb;color:#344054;font-size:12px;line-height:1.45;padding:10px}
 .lc-selected-summary{background:#fff7ed;border-color:#fed7aa;color:#7c2d12}
-.lc-source-icon-wrap{height:58px;display:flex;align-items:center;justify-content:center;margin-bottom:8px}
-.lc-source-icon-wrap span{display:flex;align-items:center;justify-content:center;width:46px;height:46px;border-radius:50%;background:#fff7ed;color:#b42318;border:1px solid #fed7aa;font-size:20px}
+.lc-sample-thumb{height:132px;border-radius:8px;background:linear-gradient(145deg,#171717,#7f1d1d 58%,#0f766e);position:relative;overflow:hidden;margin-bottom:8px;border:1px solid #e5e7eb}
+.lc-sample-badge{position:absolute;top:10px;left:10px;width:34px;height:34px;border-radius:50%;background:#fff;color:#b42318;display:flex;align-items:center;justify-content:center;font-size:15px}
+.lc-sample-host{position:absolute;left:50%;top:52%;transform:translate(-50%,-50%);width:82px;height:104px}
+.lc-sample-head{width:38px;height:38px;border-radius:50%;background:#fff7ed;margin:0 auto 5px;border:3px solid rgba(255,255,255,.38)}
+.lc-sample-body{width:72px;height:58px;border-radius:24px 24px 6px 6px;background:#ef4444;margin:0 auto}
+.lc-sample-strip{position:absolute;left:10px;right:10px;bottom:10px;background:rgba(17,24,39,.84);color:#fff;border-radius:6px;padding:6px 8px;font-size:12px;font-weight:800;text-align:center}
+.lc-tool-icon{width:42px;height:42px;border-radius:50%;background:#fff7ed;color:#b42318;border:1px solid #fed7aa;display:flex;align-items:center;justify-content:center;font-size:16px;flex:0 0 auto}
+.lc-tool-title{color:#111827}
 .lc-source-caption{font-size:12px;color:#667085;line-height:1.3;min-height:30px;text-align:center}
 .lc-source-button{border-radius:8px!important;font-weight:800!important}
+.lc-tool-button,.lc-upload-widget button{border-radius:8px!important;font-weight:800!important}
 .lc-upload-panel{display:grid;grid-template-columns:42px minmax(0,1fr);gap:10px;align-items:center;border:1px dashed #d0d5dd;border-radius:8px;background:#f9fafb;color:#344054;padding:12px}
 .lc-source-icon{width:42px;height:42px;border-radius:50%;background:#fff7ed;color:#b42318;display:flex;align-items:center;justify-content:center;font-weight:900}
 .lc-mic-recorder{border:1px solid #d0d5dd;border-radius:8px;padding:14px;background:#fff;color:#111827;box-shadow:0 8px 24px rgba(16,24,40,.06)}
@@ -1160,6 +1373,9 @@ def _style_block() -> str:
 .lc-video-caption{position:absolute;left:18px;right:18px;bottom:18px;background:rgba(17,24,39,.88);color:#fff;border-radius:8px;padding:13px 14px;font-size:16px;line-height:1.45;min-height:52px}
 .lc-audio{width:100%;margin-top:10px}
 .lc-no-audio{border:1px solid #d0d5dd;border-radius:8px;padding:10px;margin-top:10px;color:#667085;background:#f9fafb}
+.lc-progress-bar{height:10px;border-radius:999px;overflow:hidden;background:#f2f4f7;margin-top:10px}
+.lc-progress-bar div{height:100%;width:42%;background:#b42318;animation:lc-progress-sweep 1.15s ease-in-out infinite}
+@keyframes lc-progress-sweep{0%{transform:translateX(-120%)}100%{transform:translateX(260%)}}
 .lc-action-rail{min-height:390px;color:#111827}
 .lc-stats{display:flex;gap:8px;margin-bottom:10px}
 .lc-stats span{background:#f2f4f7;border-radius:999px;padding:4px 9px;font-size:12px;color:#344054}

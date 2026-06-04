@@ -798,52 +798,56 @@ def install_colab_live_mic_debug_panel() -> None:
     display(
         HTML(
             """
-            <div id="live-commerce-mic-debug" style="
-              border:1px solid #d0d5dd;
-              border-radius:8px;
-              padding:12px;
-              font-family:Arial,sans-serif;
-              max-width:720px;
-              background:#fff;
-            ">
-              <div style="font-weight:700;font-size:16px;margin-bottom:4px;">Live Microphone Stream</div>
-              <div style="color:#667085;font-size:12px;margin-bottom:10px;">Press Start to begin sending mic audio to ASR. Stop closes the input; queued chunks still finish processing.</div>
-              <div style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin-bottom:10px;">
-                <div><div style="color:#667085;font-size:12px;">Chunk</div><div id="mic-debug-chunk" style="font-weight:700;">-</div></div>
-                <div><div style="color:#667085;font-size:12px;">Detector</div><div id="mic-debug-status" style="font-weight:700;">waiting</div></div>
-                <div><div style="color:#667085;font-size:12px;">State</div><div id="mic-debug-state" style="font-weight:700;">idle</div></div>
+            <div id="live-commerce-mic-debug" style="border:1px solid #d0d5dd;border-radius:8px;padding:14px;font-family:Arial,sans-serif;background:#fff;box-shadow:0 8px 24px rgba(16,24,40,.06);">
+              <style>
+                #live-commerce-mic-debug .lm-grid{display:grid;grid-template-columns:minmax(0,1.25fr) minmax(260px,.75fr);gap:14px}
+                #live-commerce-mic-debug .lm-video{height:360px;border-radius:8px;background:linear-gradient(145deg,#171717,#7f1d1d 55%,#0f766e);position:relative;overflow:hidden}
+                #live-commerce-mic-debug .lm-video:after{content:"LIVE MIC";position:absolute;top:14px;left:14px;background:#fff;color:#111827;border-radius:999px;padding:7px 12px;font-size:12px;font-weight:800}
+                #live-commerce-mic-debug .lm-host{position:absolute;left:50%;top:54%;transform:translate(-50%,-50%);width:170px;height:220px}
+                #live-commerce-mic-debug .lm-head{width:76px;height:76px;border-radius:50%;background:#fff7ed;margin:0 auto 8px;border:5px solid rgba(255,255,255,.42)}
+                #live-commerce-mic-debug .lm-body{width:150px;height:130px;border-radius:42px 42px 10px 10px;background:#ef4444;margin:0 auto;box-shadow:0 18px 60px rgba(0,0,0,.28)}
+                #live-commerce-mic-debug .lm-caption{position:absolute;left:18px;right:18px;bottom:18px;background:rgba(17,24,39,.88);color:#fff;border-radius:8px;padding:13px;font-size:16px;line-height:1.4}
+                #live-commerce-mic-debug .lm-title{font-weight:800;font-size:17px;color:#111827;margin-bottom:8px}
+                #live-commerce-mic-debug .lm-muted{color:#667085;font-size:12px;line-height:1.4}
+                #live-commerce-mic-debug .lm-metrics{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin:12px 0}
+                #live-commerce-mic-debug .lm-metric{border:1px solid #eaecf0;border-radius:8px;padding:10px;background:#f9fafb}
+                #live-commerce-mic-debug .lm-metric strong{display:block;color:#111827;margin-top:3px}
+                #live-commerce-mic-debug .lm-buttons{display:flex;gap:8px;margin:10px 0}
+                #live-commerce-mic-debug button{border:0;border-radius:8px;padding:10px 13px;font-weight:800;cursor:pointer}
+                #live-commerce-mic-debug #mic-debug-start{background:#b42318;color:#fff}
+                #live-commerce-mic-debug #mic-debug-stop{background:#f2f4f7;color:#344054}
+                #live-commerce-mic-debug button:disabled{opacity:.5;cursor:not-allowed}
+                #live-commerce-mic-debug .lm-meter{height:10px;background:#f2f4f7;border-radius:999px;overflow:hidden;margin-top:8px}
+                #live-commerce-mic-debug .lm-meter div{height:100%;width:0%;background:#12b76a}
+                @media (max-width: 900px){#live-commerce-mic-debug .lm-grid{grid-template-columns:1fr}}
+              </style>
+              <div class="lm-grid">
+                <div>
+                  <div class="lm-video">
+                    <div class="lm-host"><div class="lm-head"></div><div class="lm-body"></div></div>
+                    <div class="lm-caption" id="mic-debug-caption">Press Start to begin sending mic audio to ASR.</div>
+                  </div>
+                  <div class="lm-meter"><div id="mic-debug-meter"></div></div>
+                </div>
+                <div>
+                  <div class="lm-title">Live Microphone Stream</div>
+                  <div class="lm-muted">Stop closes the input; queued chunks still finish processing.</div>
+                  <div class="lm-buttons">
+                    <button id="mic-debug-start">Start live mic</button>
+                    <button id="mic-debug-stop" disabled>Stop input</button>
+                  </div>
+                  <div class="lm-metrics">
+                    <div class="lm-metric"><div class="lm-muted">Chunk</div><strong id="mic-debug-chunk">-</strong></div>
+                    <div class="lm-metric"><div class="lm-muted">Detector</div><strong id="mic-debug-status">waiting</strong></div>
+                    <div class="lm-metric"><div class="lm-muted">State</div><strong id="mic-debug-state">idle</strong></div>
+                    <div class="lm-metric"><div class="lm-muted">Elapsed</div><strong id="mic-debug-elapsed">0.00s</strong></div>
+                    <div class="lm-metric"><div class="lm-muted">Volume RMS</div><strong id="mic-debug-rms">0.0000</strong></div>
+                    <div class="lm-metric"><div class="lm-muted">Threshold</div><strong id="mic-debug-threshold">-</strong></div>
+                  </div>
+                  <div id="mic-debug-silence" class="lm-muted">Silence For 0.00s</div>
+                  <div id="mic-debug-detail" class="lm-muted" style="margin-top:8px;">Waiting for mic input.</div>
+                </div>
               </div>
-              <div style="display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin-bottom:10px;">
-                <div><div style="color:#667085;font-size:12px;">Volume RMS</div><div id="mic-debug-rms">0.0000</div></div>
-                <div><div style="color:#667085;font-size:12px;">Threshold</div><div id="mic-debug-threshold">-</div></div>
-                <div><div style="color:#667085;font-size:12px;">Elapsed</div><div id="mic-debug-elapsed">0.00s</div></div>
-                <div><div style="color:#667085;font-size:12px;">Silence For</div><div id="mic-debug-silence">0.00s</div></div>
-              </div>
-              <div style="height:12px;background:#f2f4f7;border-radius:999px;overflow:hidden;">
-                <div id="mic-debug-meter" style="height:100%;width:0%;background:#12b76a;"></div>
-              </div>
-              <div style="display:flex;gap:8px;margin-top:10px;">
-              <button id="mic-debug-start" style="
-                border:0;
-                border-radius:6px;
-                padding:8px 12px;
-                background:#b42318;
-                color:#fff;
-                font-weight:700;
-                cursor:pointer;
-              ">Start live mic</button>
-              <button id="mic-debug-stop" disabled style="
-                margin-top:10px;
-                border:0;
-                border-radius:6px;
-                padding:8px 12px;
-                background:#f2f4f7;
-                color:#344054;
-                font-weight:700;
-                cursor:pointer;
-              ">Stop live mic</button>
-              </div>
-              <div id="mic-debug-detail" style="margin-top:8px;color:#667085;font-size:12px;">Run the live mic demo cell to start receiving values.</div>
             </div>
             """
         )
@@ -895,9 +899,15 @@ def install_colab_live_mic_debug_panel() -> None:
                 get('mic-debug-rms').textContent = rms.toFixed(4);
                 get('mic-debug-threshold').textContent = threshold ? threshold.toFixed(4) : '-';
                 get('mic-debug-elapsed').textContent = `${Number(payload.elapsedSeconds || payload.durationSeconds || 0).toFixed(2)}s`;
-                get('mic-debug-silence').textContent = `${Number(payload.silenceSeconds || 0).toFixed(2)}s`;
+                get('mic-debug-silence').textContent = `Silence For ${Number(payload.silenceSeconds || 0).toFixed(2)}s`;
                 get('mic-debug-meter').style.width = `${meterPct}%`;
                 get('mic-debug-meter').style.background = isSpeech ? '#12b76a' : '#f04438';
+                const caption = get('mic-debug-caption');
+                if (caption) {
+                  caption.textContent = payload.state === 'transcribing'
+                    ? 'Transcribing latest mic chunk...'
+                    : (isSpeech ? 'Receiving speech from microphone...' : (isSilence ? 'Listening for speech pause...' : (payload.status || 'Waiting for mic input.')));
+                }
                 const detailParts = [];
                 if (payload.maxSeconds) detailParts.push(`max ${Number(payload.maxSeconds).toFixed(1)}s`);
                 if (payload.minSeconds) detailParts.push(`min ${Number(payload.minSeconds).toFixed(1)}s`);
