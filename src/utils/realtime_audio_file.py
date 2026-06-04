@@ -106,6 +106,7 @@ class BrowserAudioPlaybackGate:
         self._start_event = threading.Event()
         self._stop_event = threading.Event()
         self._started_at: Optional[float] = None
+        self._stopped_at: Optional[float] = None
 
     def install(self) -> None:
         if self._installed:
@@ -127,28 +128,84 @@ class BrowserAudioPlaybackGate:
     def wait_for_start(self) -> Dict[str, Any]:
         from google.colab import output  # type: ignore
 
-        return output.eval_js(
+        status = output.eval_js(
             _build_realtime_audio_file_api_call_js(self.widget_id, "waitForStart")
         )
+        status = status if isinstance(status, dict) else {}
+        current_time = float(status.get("currentTime") or 0.0)
+        self._started_at = time.monotonic() - max(0.0, current_time)
+        if status.get("stopped"):
+            self._mark_stopped()
+        return {**self._python_status(), **status}
 
     def wait_until(self, target_seconds: float) -> Dict[str, Any]:
-        from google.colab import output  # type: ignore
-
-        return output.eval_js(
-            _build_realtime_audio_file_api_call_js(
-                self.widget_id,
-                "waitUntil",
-                [float(target_seconds)],
+        if self._started_at is None:
+            self.wait_for_start()
+        while not self._stop_event.is_set():
+            status = self._browser_status()
+            if status.get("stopped"):
+                self._mark_stopped()
+                return self.status()
+            current_time = max(
+                float(status.get("currentTime") or 0.0),
+                self._python_current_time(),
             )
-        )
+            if current_time >= float(target_seconds):
+                return {**self._python_status(), **status, "currentTime": current_time}
+            time.sleep(
+                min(
+                    self.poll_seconds,
+                    max(0.01, float(target_seconds) - current_time),
+                )
+            )
+        return self.status()
 
     def status(self) -> Dict[str, Any]:
-        from google.colab import output  # type: ignore
-
-        status = output.eval_js(
-            _build_realtime_audio_file_api_call_js(self.widget_id, "getStatus")
+        python_status = self._python_status()
+        browser_status = self._browser_status()
+        current_time = max(
+            float(python_status.get("currentTime") or 0.0),
+            float(browser_status.get("currentTime") or 0.0),
         )
-        return status if isinstance(status, dict) else {}
+        return {
+            **browser_status,
+            **python_status,
+            "currentTime": current_time,
+            "stopped": bool(
+                python_status.get("stopped") or browser_status.get("stopped")
+            ),
+        }
+
+    def _browser_status(self) -> Dict[str, Any]:
+        try:
+            from google.colab import output  # type: ignore
+
+            status = output.eval_js(
+                _build_realtime_audio_file_api_call_js(self.widget_id, "getStatus")
+            )
+            return status if isinstance(status, dict) else {}
+        except Exception:
+            return {}
+
+    def _python_current_time(self) -> float:
+        if self._started_at is None:
+            return 0.0
+        duration = max((window.end for window in self.windows), default=0.0)
+        now = self._stopped_at if self._stopped_at is not None else time.monotonic()
+        current_time = max(0.0, now - self._started_at)
+        return min(current_time, duration) if duration else current_time
+
+    def _python_status(self) -> Dict[str, Any]:
+        duration = max((window.end for window in self.windows), default=0.0)
+        current_time = self._python_current_time()
+        return {
+            "currentTime": current_time,
+            "duration": duration,
+            "paused": self._started_at is None or self._stop_event.is_set(),
+            "ended": bool(duration and current_time >= duration),
+            "stopped": self._stop_event.is_set(),
+            "mode": "python_clock",
+        }
 
     def stop(self) -> None:
         self._mark_stopped()
@@ -164,6 +221,8 @@ class BrowserAudioPlaybackGate:
             pass
 
     def _mark_stopped(self) -> None:
+        if self._stopped_at is None:
+            self._stopped_at = time.monotonic()
         self._stop_event.set()
         self._start_event.set()
 

@@ -5,6 +5,7 @@ import json
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -22,6 +23,7 @@ from src.ai.captioning import (
 )
 from src.schemas import CaptionSegment, repair_caption_timestamps, validate_caption_segments
 from src.utils.realtime_audio_file import (
+    BrowserAudioPlaybackGate,
     RealtimeAudioFileDemoConfig,
     _build_realtime_audio_file_api_call_js,
     _build_realtime_audio_file_js,
@@ -405,6 +407,24 @@ class CaptioningTests(unittest.TestCase):
             self.assertTrue(all(exists for _, _, exists in asr.calls))
             self.assertEqual(summary["processed_chunks"], 2)
             self.assertTrue((Path(temp_dir) / "realtime_file_captions.json").exists())
+
+    def test_browser_playback_gate_wait_until_uses_python_clock(self) -> None:
+        import numpy as np
+
+        windows = [
+            AudioWindow(0.0, 2.0, np.zeros(32, dtype=np.float32), 16_000),
+        ]
+        gate = BrowserAudioPlaybackGate(
+            audio_path=REPO_ROOT / "data" / "demo" / "audio" / "1.mp3",
+            windows=windows,
+            poll_seconds=0.01,
+        )
+        gate._started_at = time.monotonic() - 0.05
+        gate._browser_status = lambda: {"currentTime": 0.0, "stopped": False}  # type: ignore[method-assign]
+
+        status = gate.wait_until(0.02)
+
+        self.assertGreaterEqual(status["currentTime"], 0.02)
 
     def test_write_audio_window_wav_outputs_mono_pcm(self) -> None:
         import numpy as np
