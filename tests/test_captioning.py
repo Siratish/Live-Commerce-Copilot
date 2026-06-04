@@ -463,6 +463,73 @@ class CaptioningTests(unittest.TestCase):
                 any(item.get("state") == "skipped_silence" for item in gate.published)
             )
 
+    def test_realtime_audio_file_builds_asr_before_waiting_for_start(self) -> None:
+        import numpy as np
+
+        events = []
+
+        class FakePlaybackGate:
+            def __init__(self) -> None:
+                self.current_time = 0.0
+                self.published = []
+
+            def install(self) -> None:
+                events.append("install")
+
+            def wait_for_start(self):
+                events.append("wait_for_start")
+                states = [payload.get("state") for payload in self.published]
+                self.current_time = 0.0
+                self.assert_order(states)
+                return {"currentTime": self.current_time}
+
+            def wait_until(self, target_seconds):
+                self.current_time = float(target_seconds)
+                return {"currentTime": self.current_time}
+
+            def publish(self, payload):
+                self.published.append(dict(payload))
+
+            def assert_order(self, states):
+                self_index = states.index("loading_asr")
+                ready_index = states.index("asr_ready")
+                if self_index >= ready_index:
+                    raise AssertionError("ASR ready was published before loading")
+
+        class FakeAsr:
+            def transcribe_chunk(self, chunk_path, offset_seconds, fallback_duration_seconds):
+                return [
+                    CaptionSegment(
+                        start=offset_seconds,
+                        end=offset_seconds + fallback_duration_seconds,
+                        text="chunk",
+                        source="fake_stream_asr",
+                    )
+                ]
+
+        def build_fake_asr(_config):
+            events.append("build_asr")
+            return FakeAsr()
+
+        gate = FakePlaybackGate()
+        windows = [
+            AudioWindow(0.0, 1.0, np.ones(32, dtype=np.float32) * 0.2, 16_000),
+        ]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with patch("src.utils.realtime_audio_file._build_file_stream_asr", build_fake_asr):
+                run_realtime_audio_file_demo(
+                    RealtimeAudioFileDemoConfig(
+                        audio_path=REPO_ROOT / "data" / "demo" / "audio" / "1.mp3",
+                        output_dir=Path(temp_dir),
+                        catalog_path=REPO_ROOT / "data" / "demo" / "product_catalog.csv",
+                        promotions_path=REPO_ROOT / "data" / "demo" / "promotions.csv",
+                    ),
+                    playback_gate=gate,
+                    windows=windows,
+                )
+
+        self.assertLess(events.index("build_asr"), events.index("wait_for_start"))
+
     def test_live_mic_silence_payload_is_skipped(self) -> None:
         config = LiveMicDemoConfig(silence_threshold=0.015)
         self.assertTrue(

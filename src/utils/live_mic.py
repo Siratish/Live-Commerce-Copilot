@@ -173,20 +173,30 @@ class BrowserMicChunkSource:
             pass
 
 
-class _OpenAIWhisperLiveASR:
-    def __init__(self, model_name: str, language: str):
+_OPENAI_WHISPER_MODEL_CACHE: Dict[str, Any] = {}
+
+
+def preload_openai_whisper_model(model_name: str = "turbo") -> Any:
+    """Load and cache an OpenAI Whisper model for notebook demos."""
+    try:
+        import whisper  # type: ignore
+    except ImportError as exc:
+        raise CaptioningUnavailable(
+            "openai-whisper is not installed. Set install_asr_deps=True or run pip install -r requirements-asr.txt."
+        ) from exc
+
+    if model_name not in _OPENAI_WHISPER_MODEL_CACHE:
         if model_name in {"large", "large-v2", "large-v3", "turbo"}:
             print(f"Loading OpenAI Whisper {model_name}. This may take a while.")
-        try:
-            import whisper  # type: ignore
-        except ImportError as exc:
-            raise CaptioningUnavailable(
-                "openai-whisper is not installed. Set install_asr_deps=True or run pip install -r requirements-asr.txt."
-            ) from exc
+        _OPENAI_WHISPER_MODEL_CACHE[model_name] = whisper.load_model(model_name)
+    return _OPENAI_WHISPER_MODEL_CACHE[model_name]
 
+
+class _OpenAIWhisperLiveASR:
+    def __init__(self, model_name: str, language: str):
         self.model_name = model_name
         self.language = language
-        self.model = whisper.load_model(model_name)
+        self.model = preload_openai_whisper_model(model_name)
 
     def transcribe_chunk(
         self,
@@ -297,6 +307,7 @@ def run_colab_live_mic_demo(
     config: LiveMicDemoConfig = LiveMicDemoConfig(),
     decision_provider: Optional[CommerceDecisionProvider] = None,
     chunk_source: Optional[BrowserMicChunkSource] = None,
+    asr: Optional[Any] = None,
     cancel_event: Optional[threading.Event] = None,
 ) -> Dict[str, Any]:
     """Record browser mic chunks in Colab, transcribe them, and emit actions."""
@@ -307,7 +318,7 @@ def run_colab_live_mic_demo(
         install_colab_live_mic_debug_panel()
     else:
         _install_colab_mic_recorder()
-    asr = _build_live_asr(config)
+    asr_engine = asr or _build_live_asr(config)
     catalog = load_product_catalog(config.catalog_path)
     promotions = load_promotions(config.promotions_path)
 
@@ -370,7 +381,7 @@ def run_colab_live_mic_demo(
                     chunk_number=chunk_number,
                     config=config,
                     chunk_dir=chunk_dir,
-                    asr=asr,
+                    asr=asr_engine,
                     catalog=catalog,
                     promotions=promotions,
                     decision_provider=decision_provider,
@@ -421,7 +432,7 @@ def run_colab_live_mic_demo(
                     chunk_number=chunk_index + 1,
                     config=config,
                     chunk_dir=chunk_dir,
-                    asr=asr,
+                    asr=asr_engine,
                     catalog=catalog,
                     promotions=promotions,
                     decision_provider=decision_provider,
@@ -1126,9 +1137,8 @@ def install_colab_live_mic_debug_panel(
                 #live-commerce-mic-debug .lm-metric{border:1px solid #eaecf0;border-radius:8px;padding:10px;background:#f9fafb}
                 #live-commerce-mic-debug .lm-metric strong{display:block;color:#111827;margin-top:3px}
                 #live-commerce-mic-debug .lm-buttons{display:flex;gap:8px;margin:10px 0}
-                #live-commerce-mic-debug button{border:0;border-radius:8px;padding:10px 13px;font-weight:800;cursor:pointer}
+                #live-commerce-mic-debug button{border:0;border-radius:8px;width:48px;height:42px;font-size:18px;font-weight:800;cursor:pointer;display:inline-flex;align-items:center;justify-content:center}
                 #live-commerce-mic-debug #mic-debug-start{background:#b42318;color:#fff}
-                #live-commerce-mic-debug #mic-debug-stop{background:#f2f4f7;color:#344054}
                 #live-commerce-mic-debug button:disabled{opacity:.5;cursor:not-allowed}
                 #live-commerce-mic-debug .lm-meter{height:10px;background:#f2f4f7;border-radius:999px;overflow:hidden;margin-top:8px}
                 #live-commerce-mic-debug .lm-meter div{height:100%;width:0%;background:#12b76a}
@@ -1146,8 +1156,7 @@ def install_colab_live_mic_debug_panel(
                   <div class="lm-title">Live Microphone Stream</div>
                   <div class="lm-muted">Stop closes the input; queued chunks still finish processing.</div>
                   <div class="lm-buttons">
-                    <button id="mic-debug-start">Start live mic</button>
-                    <button id="mic-debug-stop">Stop input</button>
+                    <button id="mic-debug-start" disabled title="Enable mic input" aria-label="Enable mic input">&#127908;</button>
                   </div>
                   <div class="lm-metrics">
                     <div class="lm-metric"><div class="lm-muted">Chunk</div><strong id="mic-debug-chunk">-</strong></div>
@@ -1186,10 +1195,44 @@ def install_colab_live_mic_debug_panel(
                 if (!root) return;
                 const get = id => root.querySelector(`#${id}`);
                 const startButton = get('mic-debug-start');
-                const stopButton = get('mic-debug-stop');
+                const setMicButton = () => {
+                  const latest = state.latestDebug || {};
+                  const debugState = latest.state || 'idle';
+                  const active = debugState === 'recording'
+                    || debugState === 'buffering'
+                    || debugState === 'queued'
+                    || debugState === 'transcribing';
+                  const stopped = state.stopRequested || debugState === 'stopped';
+                  const ready = debugState === 'ready';
+                  if (!startButton) return;
+                  startButton.innerHTML = active ? '&#10073;&#10073;' : '&#127908;';
+                  startButton.title = active ? 'Disable mic input' : 'Enable mic input';
+                  startButton.setAttribute('aria-label', startButton.title);
+                  startButton.disabled = stopped || (!ready && !active);
+                };
                 if (startButton && !startButton.dataset.bound) {
                   startButton.dataset.bound = '1';
                   startButton.onclick = () => {
+                    const latest = state.latestDebug || {};
+                    const debugState = latest.state || 'idle';
+                    const active = debugState === 'recording'
+                      || debugState === 'buffering'
+                      || debugState === 'queued'
+                      || debugState === 'transcribing';
+                    if (active) {
+                      if (typeof state.stop === 'function') state.stop();
+                      if (typeof state.emitCallback === 'function') {
+                        state.emitCallback(callbackNames.stop, {stopped: true});
+                      }
+                      state.stopRequested = true;
+                      state.publishDebug({state: 'stopped', status: 'input_closed'});
+                      setMicButton();
+                      return;
+                    }
+                    if (debugState !== 'ready') {
+                      setMicButton();
+                      return;
+                    }
                     state.startRequested = true;
                     state.stopRequested = false;
                     if (callbackConfig && typeof state.emitCallback === 'function') {
@@ -1199,9 +1242,8 @@ def install_colab_live_mic_debug_panel(
                       state.resolveStart(true);
                       state.resolveStart = null;
                     }
-                    startButton.textContent = 'Recording...';
-                    startButton.disabled = true;
-                    if (stopButton) stopButton.disabled = false;
+                    state.publishDebug({state: 'buffering', status: 'started'});
+                    setMicButton();
                     if (callbackConfig && typeof state.startBufferedRecording === 'function') {
                       state.startBufferedRecording(
                         callbackConfig.maxMilliseconds,
@@ -1227,18 +1269,7 @@ def install_colab_live_mic_debug_panel(
                     }
                   };
                 }
-                if (stopButton && !stopButton.dataset.bound) {
-                  stopButton.dataset.bound = '1';
-                  stopButton.onclick = () => {
-                    if (typeof state.stop === 'function') state.stop();
-                    if (typeof state.emitCallback === 'function') {
-                      state.emitCallback(callbackNames.stop, {stopped: true});
-                    }
-                    stopButton.textContent = 'Stopping...';
-                    stopButton.disabled = true;
-                    if (startButton) startButton.disabled = true;
-                  };
-                }
+                setMicButton();
               };
               state.updateDebug = function(payload) {
                 const root = latestRoot();
@@ -1277,6 +1308,7 @@ def install_colab_live_mic_debug_panel(
                 if (payload.captionCount !== undefined) detailParts.push(`${payload.captionCount} captions`);
                 if (payload.actionCount !== undefined) detailParts.push(`${payload.actionCount} actions`);
                 get('mic-debug-detail').textContent = detailParts.join(' | ') || 'Waiting for mic input.';
+                bindControls();
               };
               state.publishDebug = state.publishDebug || function(payload) {
                 state.latestDebug = Object.assign({}, state.latestDebug || {}, payload || {});
@@ -1345,6 +1377,7 @@ def _display_live_state(
         {
             "time": round(action.timestamp, 2),
             "action": action.action_type,
+            "title": action.display_payload.get("title", action.action_type),
             "skus": " + ".join(action.skus),
             "confidence": action.confidence,
         }

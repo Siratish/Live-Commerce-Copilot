@@ -27,6 +27,7 @@ from src.utils.action_timeline import save_action_timeline_html
 from src.utils.live_mic import (
     BrowserMicChunkSource,
     LiveMicDemoConfig,
+    _build_live_asr,
     run_colab_live_mic_demo,
 )
 from src.utils.realtime_audio_file import (
@@ -112,32 +113,30 @@ class FullDemoPlaybackGate:
         self.widget_id = f"full-demo-audio-{uuid.uuid4().hex}"
         self._started = threading.Event()
         self._stopped = threading.Event()
-        self._started_at: Optional[float] = None
+        self._ready_to_start = False
+        self._playing = False
+        self._base_seconds = 0.0
+        self._play_started_at: Optional[float] = None
         self._duration = max((window.end for window in self.windows), default=0.0)
         self._state = "ready"
         self._detail = "press_start"
         self._ticker_started = False
         self.status_html = widgets.HTML()
         self.detail_html = widgets.HTML()
-        self.start_button = widgets.Button(
-            description="Start / Continue",
+        self.toggle_button = widgets.Button(
+            description="",
             icon="play",
             button_style="danger",
-            layout=widgets.Layout(width="170px", height="42px"),
+            tooltip="Start stream",
+            layout=widgets.Layout(width="54px", height="42px"),
         )
-        self.stop_button = widgets.Button(
-            description="Stop input",
-            icon="stop",
-            layout=widgets.Layout(width="140px", height="42px"),
-        )
-        self.stop_button.disabled = False
-        self.start_button.on_click(lambda _button: self.start())
-        self.stop_button.on_click(lambda _button: self.stop())
+        self.toggle_button.disabled = True
+        self.toggle_button.on_click(lambda _button: self.toggle())
         self.ui = widgets.VBox(
             [
                 widgets.HTML(self._showcase_html()),
                 widgets.HBox(
-                    [self.start_button, self.stop_button],
+                    [self.toggle_button],
                     layout=widgets.Layout(gap="8px", margin="10px 0 0 0"),
                 ),
                 self.status_html,
@@ -158,23 +157,41 @@ class FullDemoPlaybackGate:
     def install(self) -> None:
         return
 
+    def toggle(self) -> None:
+        if self._playing:
+            self.pause()
+        else:
+            self.start()
+
     def start(self) -> None:
-        if self._stopped.is_set():
+        if (
+            self._stopped.is_set()
+            or not self._ready_to_start
+            or bool(self.status().get("ended"))
+        ):
             return
-        if self._started_at is None:
-            self._started_at = time.monotonic()
+        self._play_started_at = time.monotonic()
+        self._playing = True
         self._started.set()
-        self.start_button.disabled = True
-        self.stop_button.disabled = False
         self.publish({"state": "playing", "status": "stream_started"})
         self._start_ticker()
         self._eval_audio_js("play")
 
+    def pause(self) -> None:
+        if not self._playing:
+            return
+        self._base_seconds = self._current_time()
+        self._play_started_at = None
+        self._playing = False
+        self.publish({"state": "paused", "status": "stream_paused"})
+        self._eval_audio_js("pause")
+
     def stop(self) -> None:
+        self._base_seconds = self._current_time()
+        self._play_started_at = None
+        self._playing = False
         self._stopped.set()
         self._started.set()
-        self.start_button.disabled = True
-        self.stop_button.disabled = True
         self.publish({"state": "stopped", "status": "input_closed"})
         self._eval_audio_js("pause")
 
@@ -183,31 +200,45 @@ class FullDemoPlaybackGate:
         return self.status()
 
     def wait_until(self, target_seconds: float) -> Dict[str, Any]:
-        if self._started_at is None:
+        if not self._started.is_set():
             self.wait_for_start()
-        assert self._started_at is not None
         while not self._stopped.is_set():
-            current = time.monotonic() - self._started_at
+            current = self._current_time()
             if current >= float(target_seconds):
                 return self.status()
             time.sleep(min(self.poll_seconds, max(0.01, float(target_seconds) - current)))
         return self.status()
 
     def status(self) -> Dict[str, Any]:
-        current = 0.0
-        if self._started_at is not None:
-            current = max(0.0, time.monotonic() - self._started_at)
+        current = self._current_time()
         current = min(current, self._duration) if self._duration else current
+        if self._duration and current >= self._duration:
+            self._base_seconds = self._duration
+            self._play_started_at = None
+            self._playing = False
         return {
             "currentTime": current,
             "duration": self._duration,
-            "paused": self._started_at is None or self._stopped.is_set(),
+            "paused": not self._playing,
             "ended": bool(self._duration and current >= self._duration),
             "stopped": self._stopped.is_set(),
         }
 
+    def _current_time(self) -> float:
+        if self._playing and self._play_started_at is not None:
+            current = self._base_seconds + (time.monotonic() - self._play_started_at)
+        else:
+            current = self._base_seconds
+        if self._duration:
+            current = min(current, self._duration)
+        return max(0.0, current)
+
     def publish(self, payload: Dict[str, Any]) -> None:
         self._state = str(payload.get("state") or self._state or "waiting")
+        if self._state == "loading_asr":
+            self._ready_to_start = False
+        elif self._state == "asr_ready":
+            self._ready_to_start = True
         status = self.status()
         detail_parts = [str(payload.get("status") or "waiting")]
         if payload.get("chunkIndex"):
@@ -237,6 +268,21 @@ class FullDemoPlaybackGate:
             '<div class="lc-source-detail">'
             + html.escape(self._detail)
             + "</div>"
+        )
+        self._render_toggle()
+
+    def _render_toggle(self) -> None:
+        status = self.status()
+        if self._playing:
+            self.toggle_button.icon = "pause"
+            self.toggle_button.tooltip = "Pause stream"
+        else:
+            self.toggle_button.icon = "play"
+            self.toggle_button.tooltip = "Start or resume stream"
+        self.toggle_button.disabled = (
+            self._stopped.is_set()
+            or not self._ready_to_start
+            or bool(status.get("ended"))
         )
 
     def _start_ticker(self) -> None:
@@ -306,26 +352,25 @@ class FullDemoMicGate:
     def __init__(self, widgets: Any, chunk_source: BrowserMicChunkSource) -> None:
         self.widgets = widgets
         self.chunk_source = chunk_source
+        self._ready = False
+        self._recording = False
+        self._stopped = False
         self.status_html = widgets.HTML()
         self.detail_html = widgets.HTML()
-        self.start_button = widgets.Button(
-            description="Start live mic",
+        self.toggle_button = widgets.Button(
+            description="",
             icon="microphone",
             button_style="danger",
-            layout=widgets.Layout(width="160px", height="42px"),
+            tooltip="Enable mic",
+            layout=widgets.Layout(width="54px", height="42px"),
         )
-        self.stop_button = widgets.Button(
-            description="Stop input",
-            icon="stop",
-            layout=widgets.Layout(width="140px", height="42px"),
-        )
-        self.start_button.on_click(lambda _button: self.start())
-        self.stop_button.on_click(lambda _button: self.stop())
+        self.toggle_button.disabled = True
+        self.toggle_button.on_click(lambda _button: self.toggle())
         self.ui = widgets.VBox(
             [
                 widgets.HTML(self._showcase_html()),
                 widgets.HBox(
-                    [self.start_button, self.stop_button],
+                    [self.toggle_button],
                     layout=widgets.Layout(gap="8px", margin="10px 0 0 0"),
                 ),
                 self.status_html,
@@ -335,19 +380,30 @@ class FullDemoMicGate:
         )
         self.publish("ready", "Press Start to open the browser mic.")
 
+    def toggle(self) -> None:
+        if self._recording:
+            self.stop()
+        else:
+            self.start()
+
     def start(self) -> None:
-        self.start_button.disabled = True
-        self.stop_button.disabled = False
+        if not self._ready or self._stopped or self._recording:
+            return
+        self._recording = True
         self.publish("recording", "Browser mic is starting. Speak after permission is granted.")
         self.chunk_source.start()
 
     def stop(self) -> None:
-        self.start_button.disabled = True
-        self.stop_button.disabled = True
+        self._recording = False
+        self._stopped = True
         self.chunk_source.stop()
         self.publish("stopped", "Input stopped. Queued chunks may still finish processing.")
 
     def publish(self, state: str, detail: str) -> None:
+        if state == "ready":
+            self._ready = True
+        elif state in {"loading_asr", "stopped"}:
+            self._ready = False
         self.status_html.value = (
             '<div class="lc-selected-summary">'
             f"<strong>{html.escape(state)}</strong>"
@@ -356,6 +412,16 @@ class FullDemoMicGate:
         self.detail_html.value = (
             '<div class="lc-source-detail">' + html.escape(detail) + "</div>"
         )
+        self._render_toggle()
+
+    def _render_toggle(self) -> None:
+        if self._recording:
+            self.toggle_button.icon = "microphone-slash"
+            self.toggle_button.tooltip = "Disable mic input"
+        else:
+            self.toggle_button.icon = "microphone"
+            self.toggle_button.tooltip = "Enable mic input"
+        self.toggle_button.disabled = self._stopped or not self._ready
 
     def _showcase_html(self) -> str:
         return """
@@ -909,6 +975,10 @@ def display_full_demo_ui(repo_root: Path = REPO_ROOT) -> None:
                 mic_source = BrowserMicChunkSource(config)
                 mic_source.install_recorder()
                 mic_gate = FullDemoMicGate(widgets, mic_source)
+                mic_gate.publish(
+                    "loading_asr",
+                    "Preparing OpenAI Whisper turbo. Mic input will unlock when ASR is ready.",
+                )
                 display(mic_gate.ui)
                 state["active_stop"] = mic_gate.stop
             except Exception as exc:
@@ -917,9 +987,18 @@ def display_full_demo_ui(repo_root: Path = REPO_ROOT) -> None:
 
         def worker() -> None:
             try:
+                asr_engine = None
+                if not cancel_event.is_set():
+                    asr_engine = _build_live_asr(config)
+                    if mic_source is not None:
+                        mic_gate.publish(
+                            "ready",
+                            "ASR is ready. Enable the mic when you want to stream.",
+                        )
                 summary = run_colab_live_mic_demo(
                     config,
                     chunk_source=mic_source,
+                    asr=asr_engine,
                     cancel_event=cancel_event,
                 )
                 if int(state.get("run_id") or 0) == run_id:

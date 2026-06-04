@@ -147,9 +147,11 @@ class BrowserAudioPlaybackGate:
             if status.get("stopped"):
                 self._mark_stopped()
                 return self.status()
-            current_time = max(
-                float(status.get("currentTime") or 0.0),
-                self._python_current_time(),
+            browser_time = float(status.get("currentTime") or 0.0)
+            current_time = (
+                browser_time
+                if status.get("paused")
+                else max(browser_time, self._python_current_time())
             )
             if current_time >= float(target_seconds):
                 return {**self._python_status(), **status, "currentTime": current_time}
@@ -164,14 +166,19 @@ class BrowserAudioPlaybackGate:
     def status(self) -> Dict[str, Any]:
         python_status = self._python_status()
         browser_status = self._browser_status()
-        current_time = max(
-            float(python_status.get("currentTime") or 0.0),
-            float(browser_status.get("currentTime") or 0.0),
+        browser_time = float(browser_status.get("currentTime") or 0.0)
+        current_time = (
+            browser_time
+            if browser_status.get("paused")
+            else max(float(python_status.get("currentTime") or 0.0), browser_time)
         )
         return {
             **browser_status,
             **python_status,
             "currentTime": current_time,
+            "paused": bool(
+                browser_status.get("paused") or python_status.get("paused")
+            ),
             "stopped": bool(
                 python_status.get("stopped") or browser_status.get("stopped")
             ),
@@ -279,9 +286,22 @@ def run_realtime_audio_file_demo(
         config.playback_poll_seconds,
     )
     gate.install()
+    if asr is None:
+        gate.publish(
+            {
+                "state": "loading_asr",
+                "status": f"loading_{config.asr_provider}_{config.asr_model}",
+                "totalChunks": len(audio_windows),
+                "processedChunks": 0,
+                "queueDepth": 0,
+            }
+        )
+        asr_engine = _build_file_stream_asr(config)
+    else:
+        asr_engine = asr
     gate.publish(
         {
-            "state": "waiting",
+            "state": "asr_ready",
             "status": "press_start",
             "totalChunks": len(audio_windows),
             "processedChunks": 0,
@@ -302,29 +322,6 @@ def run_realtime_audio_file_demo(
             "actions_json": str(actions_path),
             "chunk_dir": str(chunk_dir),
         }
-
-    if asr is None:
-        gate.publish(
-            {
-                "state": "loading_asr",
-                "status": f"loading_{config.asr_provider}_{config.asr_model}",
-                "totalChunks": len(audio_windows),
-                "processedChunks": 0,
-                "queueDepth": 0,
-            }
-        )
-        asr_engine = _build_file_stream_asr(config)
-    else:
-        asr_engine = asr
-        gate.publish(
-            {
-                "state": "asr_ready",
-                "status": "asr_model_ready",
-                "totalChunks": len(audio_windows),
-                "processedChunks": 0,
-                "queueDepth": 0,
-            }
-        )
     catalog = load_product_catalog(config.catalog_path)
     promotions = load_promotions(config.promotions_path)
 
@@ -627,8 +624,7 @@ def _build_realtime_audio_file_html(
     #{widget_id} .rt-metric strong{{display:block;color:#111827;margin-top:3px}}
     #{widget_id} .rt-buttons{{display:flex;gap:8px;margin:10px 0}}
     #{widget_id} button{{border:0;border-radius:8px;padding:10px 13px;font-weight:800;cursor:pointer}}
-    #{widget_id} [data-role=start]{{background:#b42318;color:#fff}}
-    #{widget_id} [data-role=stop]{{background:#f2f4f7;color:#344054}}
+    #{widget_id} [data-role=start]{{background:#b42318;color:#fff;width:48px;height:42px;display:inline-flex;align-items:center;justify-content:center;font-size:18px}}
     #{widget_id} button:disabled{{opacity:.5;cursor:not-allowed}}
     #{widget_id} .rt-progress{{height:10px;background:#f2f4f7;border-radius:999px;overflow:hidden;margin-top:8px}}
     #{widget_id} .rt-progress div{{height:100%;width:0%;background:#e51b23}}
@@ -647,8 +643,7 @@ def _build_realtime_audio_file_html(
       <div class="rt-panel-title">Live Audio Stream</div>
       <div class="rt-muted">Audio is released to ASR only as stream time advances. Seeking is disabled for this demo.</div>
       <div class="rt-buttons">
-        <button data-role="start" disabled>Start / Continue</button>
-        <button data-role="stop">Stop input</button>
+        <button data-role="start" disabled title="Start stream" aria-label="Start stream">&#9654;</button>
       </div>
       <div class="rt-metrics">
         <div class="rt-metric"><div class="rt-muted">Playback</div><strong data-role="time">0.00s / {duration:.2f}s</strong></div>
@@ -695,7 +690,6 @@ def _build_realtime_audio_file_js(
 
     const audio = root.querySelector("audio");
     const startButton = root.querySelector('[data-role="start"]');
-    const stopButton = root.querySelector('[data-role="stop"]');
     const get = role => root.querySelector(`[data-role="${{role}}"]`);
     const apiRoot = window.realtimeAudioFileDemo = window.realtimeAudioFileDemo || {{}};
     let stopRequested = false;
@@ -704,6 +698,7 @@ def _build_realtime_audio_file_js(
     let startedAtMs = 0;
     let ticker = null;
     let pendingStartResolve = null;
+    let readyToStart = false;
 
     const duration = () => {{
       const audioDuration = audio && audio.duration && Number.isFinite(audio.duration) ? audio.duration : 0;
@@ -762,13 +757,17 @@ def _build_realtime_audio_file_js(
         resolve(getStatus());
       }}
     }};
+    const setToggleButton = () => {{
+      startButton.innerHTML = playing ? "&#10073;&#10073;" : "&#9654;";
+      startButton.title = playing ? "Pause stream" : "Start stream";
+      startButton.setAttribute("aria-label", playing ? "Pause stream" : "Start stream");
+      startButton.disabled = stopRequested || !readyToStart || getStatus().ended;
+    }};
     const startInput = () => {{
-      if (stopRequested) return;
+      if (stopRequested || !readyToStart) return;
       baseSeconds = streamTime();
       startedAtMs = performance.now();
       playing = true;
-      startButton.disabled = true;
-      stopButton.disabled = false;
       get("state").textContent = "playing";
       get("caption").textContent = "Streaming audio into ASR...";
       setDetail("Playback clock started. Chunks are released by stream time.");
@@ -782,8 +781,26 @@ def _build_realtime_audio_file_js(
       }}
       updateTime();
       scheduleTick();
+      setToggleButton();
       resolveStart();
       invokeCallback(startCallback, getStatus());
+    }};
+    const pauseInput = () => {{
+      if (!playing) return;
+      baseSeconds = streamTime();
+      playing = false;
+      if (ticker) window.clearTimeout(ticker);
+      ticker = null;
+      if (audio) audio.pause();
+      get("state").textContent = "paused";
+      get("caption").textContent = "Stream paused. Resume to release more chunks.";
+      setDetail("Input is paused. ASR waits until stream time advances again.");
+      updateTime();
+      setToggleButton();
+    }};
+    const toggleInput = () => {{
+      if (playing) pauseInput();
+      else startInput();
     }};
     const stopInput = () => {{
       baseSeconds = streamTime();
@@ -792,22 +809,20 @@ def _build_realtime_audio_file_js(
       if (ticker) window.clearTimeout(ticker);
       ticker = null;
       if (audio) audio.pause();
-      startButton.disabled = true;
-      stopButton.disabled = true;
       get("state").textContent = "stopped";
       setDetail("Input stopped. Already released chunks will finish processing.");
       updateTime();
+      setToggleButton();
       resolveStart();
       invokeCallback(stopCallback, getStatus());
     }};
 
-    startButton.addEventListener("click", startInput);
-    stopButton.addEventListener("click", stopInput);
-    startButton.disabled = false;
-    stopButton.disabled = false;
+    startButton.addEventListener("click", toggleInput);
+    startButton.disabled = true;
 
     apiRoot[widgetId] = {{
       start: startInput,
+      pause: pauseInput,
       stop: stopInput,
       getStatus,
       waitForStart() {{
@@ -838,6 +853,14 @@ def _build_realtime_audio_file_js(
       publish(payload) {{
         updateTime();
         if (payload.state) get("state").textContent = payload.state;
+        if (payload.state === "loading_asr") {{
+          readyToStart = false;
+          setToggleButton();
+        }}
+        if (payload.state === "asr_ready") {{
+          readyToStart = true;
+          setToggleButton();
+        }}
         if (payload.chunkIndex) get("chunk").textContent = `${{payload.chunkIndex}} / ${{payload.totalChunks || "?"}}`;
         if (payload.queueDepth !== undefined) get("queue").textContent = String(payload.queueDepth);
         if (payload.status) get("caption").textContent = payload.status;
@@ -854,8 +877,9 @@ def _build_realtime_audio_file_js(
     }};
     if (audio) audio.addEventListener("loadedmetadata", updateTime);
     get("state").textContent = "ready";
-    setDetail("Controls ready. Press Start to release audio chunks in real time.");
+    setDetail("Loading ASR before stream controls are enabled.");
     updateTime();
+    setToggleButton();
   }};
   install();
 }})();
@@ -927,6 +951,7 @@ def _display_realtime_file_state(
         {
             "time": round(action.timestamp, 2),
             "action": action.action_type,
+            "title": action.display_payload.get("title", action.action_type),
             "skus": " + ".join(action.skus),
             "confidence": action.confidence,
         }
