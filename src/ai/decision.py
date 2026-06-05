@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Optional, Protocol, Sequence
+from typing import List, Optional, Protocol, Sequence
 
 from src.ai.retrieval import ProductCandidate, PromotionCandidate, extract_numbers, normalize_search_text
 from src.schemas import ProductCatalogItem, Promotion

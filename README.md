@@ -1,10 +1,11 @@
-# TrueID Live Commerce Copilot
+# Live Commerce Copilot
 
-Captioning slice for a Colab-safe AI live commerce copilot concept tailored for
-True Digital Group and True Corp.
+Colab-safe AI live-commerce copilot demo for turning live-stream speech into
+captions and synchronized commerce actions.
 
-This first implementation focuses only on timestamped captions. It intentionally
-does not include product grounding, viewer Q&A, recommendations, or chat
+This implementation focuses on timestamped captions, transcript-driven product
+and promotion actions, bundle recommendations, and flash-sale countdowns. It
+intentionally does not include product visual grounding, viewer Q&A, or chat
 analytics yet.
 
 ## What Runs Today
